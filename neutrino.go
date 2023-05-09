@@ -713,8 +713,9 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
-	cfHdrWorkManager     *query.WorkManager
-	blkHdrWorkManager    *query.WorkManager
+
+	cfHdrWorkManager  query.WorkManager
+	blkHdrWorkManager query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -790,15 +791,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
-	s.cfHdrWorkManager = query.New(&query.Config{
+
+	s.cfHdrWorkManager = query.NewWorkManager(&query.Config{
 		ConnectedPeers:       s.ConnectedPeers,
 		NewWorker:            query.NewWorker,
 		Ranking:              query.NewPeerRanking(),
 		IsEligibleWorkerFunc: query.IsWorkerEligibleForCFHdrFetch,
-
-		Temp: "cfhdrWorkmanager",
+		Temp:                 "cfhdrWorkmanager",
 	})
-	s.blkHdrWorkManager = query.New(&query.Config{
+	s.blkHdrWorkManager = query.NewWorkManager(&query.Config{
 		ConnectedPeers:       s.ConnectedPeers,
 		NewWorker:            query.NewWorker,
 		Ranking:              query.NewPeerRanking(),
