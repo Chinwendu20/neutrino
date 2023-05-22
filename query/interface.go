@@ -14,6 +14,10 @@ const (
 	// defaultQueryEncoding specifies the default encoding (witness or not)
 	// for `getdata` and other similar messages.
 	defaultQueryEncoding = wire.WitnessEncoding
+
+	// defaultNumRetries is the default number of times that a query job
+	// will be retried.
+	defaultNumRetries = 2
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -32,6 +36,15 @@ type queryOptions struct {
 	cancelChan chan struct{}
 
 	errChan chan error
+
+	// numRetries is the number of times that a query should be retried
+	// before failing.
+	numRetries uint8
+
+	// noRetryMax is set if no cap should be applied to the number of times
+	// that a query can be retried. If this is set then numRetries has no
+	// effect.
+	noRetryMax bool
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -45,7 +58,7 @@ func defaultQueryOptions() *queryOptions {
 	return &queryOptions{
 		timeout:    defaultQueryTimeout,
 		encoding:   defaultQueryEncoding,
-		cancelChan: nil,
+		numRetries: defaultNumRetries,
 	}
 }
 
@@ -53,6 +66,22 @@ func defaultQueryOptions() *queryOptions {
 func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	for _, option := range options {
 		option(qo)
+	}
+}
+
+// NumRetries is a query option that specifies the number of times a query
+// should be retried.
+func NumRetries(num uint8) QueryOption {
+	return func(qo *queryOptions) {
+		qo.numRetries = num
+	}
+}
+
+// NoRetryMax is a query option that can be used to disable the cap on the
+// number of retries. If this is set then NumRetries has no effect.
+func NoRetryMax() QueryOption {
+	return func(qo *queryOptions) {
+		qo.noRetryMax = true
 	}
 }
 
@@ -130,8 +159,6 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
-
-	ResultChan() chan *JobResult
 }
 
 // Peer is the interface that defines the methods needed by the query package

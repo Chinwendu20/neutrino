@@ -25,6 +25,7 @@ var (
 // addition to some information about the query.
 type QueryJob struct {
 	JobIndex   float64
+	tries      uint8
 	timeout    time.Duration
 	encoding   wire.MessageEncoding
 	cancelChan <-chan struct{}
