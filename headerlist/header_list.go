@@ -1,6 +1,9 @@
 package headerlist
 
-import "github.com/btcsuite/btcd/wire"
+import (
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+)
 
 // Chain is an interface that stores a list of Nodes. Each node represents a
 // header in the main chain and also includes a height along with it. This is
@@ -36,6 +39,8 @@ type Node struct {
 	Header wire.BlockHeader
 
 	prev *Node
+
+	HeaderHash chainhash.Hash
 }
 
 // Prev attempts to access the prior node within the header chain relative to

@@ -2,6 +2,7 @@ package query
 
 import (
 	"sort"
+	"sync"
 )
 
 const (
@@ -22,7 +23,8 @@ const (
 type peerRanking struct {
 	// rank keeps track of the current set of peers and their score. A
 	// lower score is better.
-	rank map[string]uint64
+	rank  map[string]uint64
+	mutex sync.RWMutex
 }
 
 // A compile time check to ensure peerRanking satisfies the PeerRanking
@@ -40,12 +42,15 @@ func NewPeerRanking() PeerRanking {
 // peer has no current score given, the default will be used.
 func (p *peerRanking) Order(peers []string) {
 	sort.Slice(peers, func(i, j int) bool {
+		p.mutex.RLock()
 		score1, ok := p.rank[peers[i]]
+		p.mutex.RUnlock()
 		if !ok {
 			score1 = defaultScore
 		}
-
+		p.mutex.RLock()
 		score2, ok := p.rank[peers[j]]
+		p.mutex.RUnlock()
 		if !ok {
 			score2 = defaultScore
 		}
@@ -55,15 +60,26 @@ func (p *peerRanking) Order(peers []string) {
 
 // AddPeer adds a new peer to the ranking, starting out with the default score.
 func (p *peerRanking) AddPeer(peer string) {
+
+	p.mutex.RLock()
 	if _, ok := p.rank[peer]; ok {
+
+		p.mutex.RUnlock()
 		return
 	}
+
+	p.mutex.RUnlock()
+	p.mutex.Lock()
 	p.rank[peer] = defaultScore
+
+	p.mutex.Unlock()
 }
 
 // Punish increases the score of the given peer.
 func (p *peerRanking) Punish(peer string) {
+	p.mutex.RLock()
 	score, ok := p.rank[peer]
+	p.mutex.RUnlock()
 	if !ok {
 		return
 	}
@@ -72,14 +88,17 @@ func (p *peerRanking) Punish(peer string) {
 	if score == worstScore {
 		return
 	}
-
+	p.mutex.Lock()
 	p.rank[peer] = score + 1
+	p.mutex.Unlock()
 }
 
 // Reward decreases the score of the given peer.
 // TODO(halseth): use actual response time when ranking peers.
 func (p *peerRanking) Reward(peer string) {
+	p.mutex.RLock()
 	score, ok := p.rank[peer]
+	p.mutex.RUnlock()
 	if !ok {
 		return
 	}
@@ -88,6 +107,7 @@ func (p *peerRanking) Reward(peer string) {
 	if score == bestScore {
 		return
 	}
-
+	p.mutex.Lock()
 	p.rank[peer] = score - 1
+	p.mutex.Unlock()
 }

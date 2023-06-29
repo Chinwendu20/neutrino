@@ -47,6 +47,8 @@ type Worker interface {
 	// delivered on the results channel (except when the quit channel has
 	// been closed).
 	NewJob() chan<- *queryJob
+
+	Peer() TestPeer
 }
 
 // PeerRanking is an interface that must be satisfied by the underlying module
@@ -73,9 +75,11 @@ type PeerRanking interface {
 // we have given to it.
 // TODO(halseth): support more than one active job at a time.
 type activeWorker struct {
-	w         Worker
-	activeJob *queryJob
-	onExit    chan struct{}
+	w             Worker
+	activeJob     *queryJob
+	onExit        chan struct{}
+	testActiveJob *TestQueryJob
+	tw            testWorker
 }
 
 // Config holds the configuration options for a new WorkManager.
@@ -94,6 +98,8 @@ type Config struct {
 	// Ranking is used to rank the connected peers when determining who to
 	// give work to.
 	Ranking PeerRanking
+
+	TestNewWorker func(TestPeer) *testWorker
 }
 
 // WorkManager is the main access point for outside callers, and satisfies the
@@ -110,8 +116,13 @@ type WorkManager struct {
 	// workers will be sent.
 	jobResults chan *jobResult
 
-	quit chan struct{}
-	wg   sync.WaitGroup
+	//TODO(maureen): remove
+	test      chan *testbatch
+	NewWorker func(Peer) Worker
+
+	quit           chan struct{}
+	wg             sync.WaitGroup
+	testJobResults chan *testJobResult
 }
 
 // Compile time check to ensure WorkManager satisfies the Dispatcher interface.
@@ -120,17 +131,27 @@ var _ Dispatcher = (*WorkManager)(nil)
 // New returns a new WorkManager with the regular worker implementation.
 func New(cfg *Config) *WorkManager {
 	return &WorkManager{
-		cfg:        cfg,
-		newBatches: make(chan *batch),
-		jobResults: make(chan *jobResult),
-		quit:       make(chan struct{}),
+		cfg:            cfg,
+		newBatches:     make(chan *batch),
+		jobResults:     make(chan *jobResult),
+		quit:           make(chan struct{}),
+		test:           make(chan *testbatch),
+		testJobResults: make(chan *testJobResult),
 	}
 }
 
+var testWork = &testWorkQueue{}
+var testWorkers = make(map[string]*activeWorker)
+var testRWMutex sync.RWMutex
+
 // Start starts the WorkManager.
 func (w *WorkManager) Start() error {
-	w.wg.Add(1)
+	heap.Init(testWork)
+	testRWMutex = sync.RWMutex{}
+	w.wg.Add(3)
 	go w.workDispatcher()
+	go w.testDistributeWork()
+	go w.testWorkDispatcher()
 
 	return nil
 }
@@ -284,7 +305,7 @@ Loop:
 		// A new result came back.
 		case result := <-w.jobResults:
 			log.Tracef("Result for job %v received from peer %v "+
-				"(err=%v)", result.job.index,
+				"(err=%v)", result.job.Index(),
 				result.peer.Addr(), result.err)
 
 			// Delete the job from the worker's active job, such
@@ -296,8 +317,8 @@ Loop:
 			// from the map of current queries, since we don't have
 			// to track it anymore. We'll add it back if the result
 			// turns out to be an error.
-			batchNum := currentQueries[result.job.index]
-			delete(currentQueries, result.job.index)
+			batchNum := currentQueries[result.job.Index()]
+			delete(currentQueries, result.job.Index())
 			batch := currentBatches[batchNum]
 
 			switch {
@@ -305,7 +326,7 @@ Loop:
 			case result.err == ErrJobCanceled:
 				log.Tracef("Query(%d) was canceled before "+
 					"result was available from peer %v",
-					result.job.index, result.peer.Addr())
+					result.job.Index(), result.peer.Addr())
 
 				// If this is the first job in this batch that
 				// was canceled, forward the error on the
@@ -327,7 +348,7 @@ Loop:
 				w.cfg.Ranking.Punish(result.peer.Addr())
 
 				log.Warnf("Query(%d) from peer %v failed, "+
-					"rescheduling: %v", result.job.index,
+					"rescheduling: %v", result.job.Index(),
 					result.peer.Addr(), result.err)
 
 				// If it was a timeout, we dynamically increase
@@ -341,7 +362,7 @@ Loop:
 				}
 
 				heap.Push(work, result.job)
-				currentQueries[result.job.index] = batchNum
+				currentQueries[result.job.Index()] = batchNum
 
 			// Otherwise we got a successful result and  update the
 			// status of the batch this query is a part of.
@@ -380,7 +401,7 @@ Loop:
 
 					log.Warnf("Query(%d) failed with "+
 						"error: %v. Timing out.",
-						result.job.index, result.err)
+						result.job.Index(), result.err)
 
 					log.Debugf("Batch %v timed out",
 						batchNum)
@@ -388,6 +409,8 @@ Loop:
 				default:
 				}
 			}
+
+		// A new batch of queries where scheduled.
 
 		// A new batch of queries where scheduled.
 		case batch := <-w.newBatches:
@@ -415,11 +438,326 @@ Loop:
 				errChan: batch.errChan,
 			}
 			batchIndex++
-
 		case <-w.quit:
 			return
 		}
 	}
+}
+
+// Init a work queue which will be used to sort the incoming queries in
+// a first come first served fashion. We use a heap structure such
+// that we can efficiently put failed queries back in the queue.
+
+func (w *WorkManager) testDistributeWork() {
+	defer w.wg.Done()
+
+Loop:
+	for {
+
+		// If the work queue is non-empty, we'll take out the first
+		// element in order to distribute it to a worker.
+		//TODO: Possible race conditon with testwork
+		testRWMutex.RLock()
+		if testWork.Len() > 0 && len(testWorkers) > 0 {
+			testRWMutex.RUnlock()
+
+			next := testWork.Peek().(*TestQueryJob)
+
+			// Find the peers with free work slots available.
+			var eligibleWorkers []string
+			testRWMutex.RLock()
+			for p, r := range testWorkers {
+
+				// Only one active job at a time is currently
+				// supported.
+				if r.testActiveJob != nil {
+					//log.Debugf("Uneligible worker: Peer has work already")
+					continue
+				}
+				if !r.tw.Peer().IsPeerBehindStartHeight(next.TestRequest) {
+					//log.Debugf("Uneligible worker: Peer behind")
+					continue
+
+				}
+				log.Debugf("Num eligible worker: %v", len(eligibleWorkers))
+				eligibleWorkers = append(eligibleWorkers, p)
+			}
+			testRWMutex.RUnlock()
+
+			// Use the historical data to rank them.
+			w.cfg.Ranking.Order(eligibleWorkers)
+
+			// Give the job to the highest ranked peer with free
+			// slots available.
+			//log.Debugf("Trying to give eligible worker work: Num eligible worker: %v", len(eligibleWorkers))
+			for _, p := range eligibleWorkers {
+				testRWMutex.RLock()
+				r := testWorkers[p]
+				testRWMutex.RUnlock()
+
+				// The worker has free work slots, it should
+				// pick up the query.
+				log.Debugf("Giving Next job to peer: %v", r.tw.Peer())
+				select {
+				case r.tw.NewJob() <- next:
+					log.Debugf("Sent job %v to worker %v",
+						next.Index(), p)
+					heap.Pop(testWork)
+
+					r.testActiveJob = next
+
+					// Go back to start of loop, to check
+					// if there are more jobs to
+					// distribute.
+					continue Loop
+
+				// Remove workers no longer active.
+				case <-r.onExit:
+					testRWMutex.Lock()
+					delete(testWorkers, p)
+					testRWMutex.Unlock()
+					continue
+
+				case <-w.quit:
+					return
+				}
+
+			}
+		} else {
+			testRWMutex.RUnlock()
+		}
+
+	}
+}
+
+// TODO(maureen): Remove
+func (w *WorkManager) testWorkDispatcher() {
+	log.Infof("Inside testWorkDispatcher")
+	defer w.wg.Done()
+
+	// Get a peer subscription. We do it in this goroutine rather than
+	// Start to avoid a deadlock when starting the WorkManager fetches the
+	// peers from the server.
+	peersConnected, cancel, err := w.cfg.ConnectedPeers()
+
+	if err != nil {
+		log.Errorf("Unable to get connected peers: %v", err)
+		return
+	}
+	defer cancel()
+
+	type batchProgress struct {
+		timeout <-chan time.Time
+		rem     int
+		errChan chan error
+	}
+
+	// We set up a batch index counter to keep track of batches that still
+	// have queries in flight. This lets us track when all queries for a
+	// batch have been finished, and return an (non-)error to the caller.
+	batchIndex := uint64(0)
+	currentBatches := make(map[uint64]*batchProgress)
+
+	// When the work dispatcher exits, we'll loop through the remaining
+	// batches and send on their error channel.
+	defer func() {
+		for _, b := range currentBatches {
+			b.errChan <- ErrWorkManagerShuttingDown
+		}
+	}()
+
+	// We set up a counter that we'll increase with each incoming query,
+	// and will serve as the priority of each. In addition we map each
+	// query to the batch they are part of.
+	queryIndex := float64(0)
+	currentQueries := make(map[float64]uint64)
+
+Loop:
+	for {
+		// Otherwise the work queue is empty, or there are no workers
+		// to distribute work to, so we'll just wait for a result of a
+		// previous query to come back, a new peer to connect, or for a
+		// new batch of queries to be scheduled.
+		log.Debugf("---------- ------- In testworkispatcher")
+		select {
+		// Spin up a goroutine that runs a worker each time a peer
+		// connects.
+		case peer := <-peersConnected:
+			testPeer, _ := peer.(TestPeer)
+
+			r := w.cfg.TestNewWorker(testPeer)
+			log.Debugf("-------- ------Into it ! %v",
+				peer.Addr())
+			// We'll create a channel that will close after the
+			// worker's Run method returns, to know when we can
+			// remove it from our set of active workers.
+			onExit := make(chan struct{})
+			log.Debugf("About to be locked in peers connected",
+				peer.Addr())
+			testRWMutex.Lock()
+			testWorkers[peer.Addr()] = &activeWorker{
+				tw:        *r,
+				activeJob: nil,
+				onExit:    onExit,
+			}
+			testRWMutex.Unlock()
+			log.Debugf("Added peer %v in workers map",
+				peer.Addr())
+
+			w.cfg.Ranking.AddPeer(peer.Addr())
+
+			w.wg.Add(1)
+			go func() {
+				defer w.wg.Done()
+				defer close(onExit)
+
+				r.Run(w.testJobResults, w.quit)
+			}()
+
+		// A new result came back.
+		case result := <-w.testJobResults:
+			log.Debugf("Test -- Result for job %v received from peer %v "+
+				"(err=%v)", result.job.Index(),
+				result.peer.Addr(), result.err)
+
+			// Delete the job from the worker's active job, such
+			// that the slot gets opened for more work.
+			testRWMutex.RLock()
+			r := testWorkers[result.peer.Addr()]
+			testRWMutex.RUnlock()
+			r.testActiveJob = nil
+
+			// Get the index of this query's batch, and delete it
+			// from the map of current queries, since we don't have
+			// to track it anymore. We'll add it back if the result
+			// turns out to be an error.
+			batchNum := currentQueries[result.job.Index()]
+			delete(currentQueries, result.job.Index())
+			batch := currentBatches[batchNum]
+
+			switch {
+			// If the query ended because it was canceled, drop it.
+			case result.err == ErrJobCanceled:
+				log.Tracef("Query(%d) was canceled before "+
+					"result was available from peer %v",
+					result.job.Index(), result.peer.Addr())
+
+				// If this is the first job in this batch that
+				// was canceled, forward the error on the
+				// batch's error channel.  We do this since a
+				// cancellation applies to the whole batch.
+				if batch != nil {
+					batch.errChan <- result.err
+					delete(currentBatches, batchNum)
+
+					log.Debugf("Canceled batch %v",
+						batchNum)
+					continue Loop
+				}
+
+			// If the query ended with any other error, put it back
+			// into the work queue.
+			case result.err != nil:
+				// Punish the peer for the failed query.
+				w.cfg.Ranking.Punish(result.peer.Addr())
+
+				log.Debugf("Test -- Query(%d) from peer %v failed, "+
+					"rescheduling: %v", result.job.Index(),
+					result.peer.Addr(), result.err)
+
+				// If it was a timeout, we dynamically increase
+				// it for the next attempt.
+				if result.err == ErrQueryTimeout {
+					newTimeout := result.job.Timeout * 2
+					if newTimeout > maxQueryTimeout {
+						newTimeout = maxQueryTimeout
+					}
+					result.job.Timeout = newTimeout
+				}
+
+				heap.Push(testWork, result.job)
+				currentQueries[result.job.Index()] = batchNum
+
+			// Otherwise we got a successful result and  update the
+			// status of the batch this query is a part of.
+			default:
+				// Reward the peer for the successful query.
+				w.cfg.Ranking.Reward(result.peer.Addr())
+
+				// Decrement the number of queries remaining in
+				// the batch.
+				if batch != nil {
+					batch.rem--
+					log.Debugf("Remaining jobs for batch "+
+						"%v: %v ", batchNum, batch.rem)
+
+					// If this was the last query in flight
+					// for this batch, we can notify that
+					// it finished, and delete it.
+					if batch.rem == 0 {
+						batch.errChan <- nil
+						delete(currentBatches, batchNum)
+
+						log.Tracef("Batch %v done",
+							batchNum)
+						continue Loop
+					}
+				}
+			}
+
+			// If the total timeout for this batch has passed,
+			// return an error.
+			if batch != nil {
+				select {
+				case <-batch.timeout:
+					batch.errChan <- ErrQueryTimeout
+					delete(currentBatches, batchNum)
+
+					log.Warnf("Query(%d) failed with "+
+						"error: %v. Timing out.",
+						result.job.Index(), result.err)
+
+					log.Debugf("Batch %v timed out",
+						batchNum)
+
+				default:
+				}
+			}
+
+		// A new batch of queries where scheduled.
+		case batch := <-w.test:
+			// Add all new queries in the batch to our work queue,
+			// with priority given by the order they were
+			// scheduled.
+			log.Debugf("Adding new test batch(%d) of %d queries to "+
+				"work queue", batchIndex, len(batch.requests))
+
+			for _, q := range batch.requests {
+				heap.Push(testWork, &TestQueryJob{
+					TestIndex:   queryIndex,
+					Timeout:     minQueryTimeout,
+					encoding:    batch.options.encoding,
+					cancelChan:  batch.options.cancelChan,
+					TestRequest: q,
+				})
+				currentQueries[queryIndex] = batchIndex
+				queryIndex++
+			}
+
+			currentBatches[batchIndex] = &batchProgress{
+				timeout: time.After(batch.options.timeout),
+				rem:     len(batch.requests),
+				errChan: batch.errChan,
+			}
+			batchIndex++
+		case <-w.quit:
+			return
+
+		}
+
+		log.Debugf("Out of Select statement")
+	}
+
 }
 
 // Query distributes the slice of requests to the set of connected peers.
@@ -441,6 +779,36 @@ func (w *WorkManager) Query(requests []*Request,
 		errChan:  errChan,
 	}:
 	case <-w.quit:
+		errChan <- ErrWorkManagerShuttingDown
+	}
+
+	return errChan
+}
+
+type testbatch struct {
+	requests []*TestRequest
+	options  *queryOptions
+	errChan  chan error
+}
+
+func (w *WorkManager) TestQuery(requests []*TestRequest,
+	options ...QueryOption) chan error {
+	log.Debugf("Testing query")
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+
+	errChan := make(chan error, 1)
+
+	// Add query messages to the queue of batches to handle.
+	select {
+	case w.test <- &testbatch{
+		requests: requests,
+		options:  qo,
+		errChan:  errChan,
+	}:
+
+	case <-w.quit:
+		log.Debugf("Inside test query and quiting")
 		errChan <- ErrWorkManagerShuttingDown
 	}
 

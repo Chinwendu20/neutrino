@@ -532,6 +532,41 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	}
 }
 
+// TODO: Unexport HeaderQuery
+func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
+
+	queryGetHeaders, ok := req.(*HeaderQuery)
+
+	if !ok {
+		return errors.New("request is not type HeaderQuery")
+	}
+
+	err := sp.PushGetHeadersMsg(queryGetHeaders.Locator, queryGetHeaders.StopHash)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {
+	queryGetHeaders, ok := req.(*HeaderQuery)
+	if !ok {
+		log.Tracef("request is not type HeaderQuery")
+
+		return true
+	}
+	if sp.LastBlock() < queryGetHeaders.StartHeight {
+
+		return false
+
+	}
+
+	return true
+
+}
+
 // OnDisconnect returns a channel that will be closed when this peer is
 // disconnected.
 //
@@ -745,6 +780,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		ConnectedPeers: s.ConnectedPeers,
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
+		TestNewWorker:  query.TestNewWorker,
 	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,

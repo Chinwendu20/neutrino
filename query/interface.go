@@ -112,6 +112,24 @@ type Request struct {
 	HandleResp func(req, resp wire.Message, peer string) Progress
 }
 
+type TestRequest struct {
+	// Req is the message request to send.
+	Req interface{}
+
+	// HandleResp is a response handler that will be called for every
+	// message received from the peer that the request was made to. It
+	// should validate the response against the request made, and return a
+	// Progress indicating whether the request was answered by this
+	// particular response.
+	//
+	// NOTE: Since the worker's job queue will be stalled while this method
+	// is running, it should not be doing any expensive operations. It
+	// should validate the response and immediately return the progress.
+	// The response should be handed off to another goroutine for
+	// processing.
+	HandleResp func(resp wire.Message, peer TestPeer, testReq *TestQueryJob) Progress
+}
+
 // Dispatcher is an interface defining the API for dispatching queries to
 // bitcoin peers.
 type Dispatcher interface {
@@ -120,6 +138,7 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
+	TestQuery(reqs []*TestRequest, options ...QueryOption) chan error
 }
 
 // Peer is the interface that defines the methods needed by the query package
@@ -142,4 +161,28 @@ type Peer interface {
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
 	OnDisconnect() <-chan struct{}
+}
+
+type TestPeer interface {
+	// QueueMessageWithEncoding adds the passed bitcoin message to the peer
+	// send queue.
+	QueueMessageWithEncoding(msg wire.Message, doneChan chan<- struct{},
+		encoding wire.MessageEncoding)
+
+	// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
+	// messages received from this peer will be sent on the returned
+	// channel. A closure is also returned, that should be called to cancel
+	// the subscription.
+	SubscribeRecvMsg() (<-chan wire.Message, func())
+
+	// Addr returns the address of this peer.
+	Addr() string
+
+	// OnDisconnect returns a channel that will be closed when this peer is
+	// disconnected.
+	OnDisconnect() <-chan struct{}
+
+	QueryGetHeadersMsg(req interface{}) error
+
+	IsPeerBehindStartHeight(req interface{}) bool
 }
