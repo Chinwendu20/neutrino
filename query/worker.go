@@ -305,14 +305,20 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 		RespChan: make(chan struct{}),
 		Results:  results,
 	}
+
+nextJobLoop:
+	var (
+		job     *TestQueryJob
+		jobErr  error
+		timeout *time.Timer
+	)
 	for {
 		log.Debugf("Worker %v waiting for more work", peer.Addr())
 
-		var job *TestQueryJob
 		select {
 		// Poll a new job from the nextJob channel.
 		case job = <-w.nextJob:
-			log.Tracef("Worker %v picked up job with index %v",
+			log.Debugf("Worker %v picked up job with index %v",
 				peer.Addr(), job.Index())
 
 		// If the peer disconnected, we can exit immediately, as we
@@ -336,7 +342,7 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 			// We break to the below loop, where we'll check the
 			// cancel channel again and the ErrJobCanceled
 			// result will be sent back.
-			break
+			return
 
 		// We received a non-canceled query job, send it to the peer.
 		default:
@@ -353,67 +359,57 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 			job.HandleResp(
 				peer, &blkQuery,
 			)
-
-		}
-
-		// Wait for the correct response to be received from the peer,
-		// or an error happening.
-		var (
-			jobErr  error
 			timeout = time.NewTimer(job.Timeout)
-		)
-
-	Loop:
-		for {
-			select {
-			// A message was received from the peer, use the
-			// response handler to check whether it was answering
-			// our request.
-			case <-blkQuery.RespChan:
-				log.Debugf("Gotten message from %v for job index %v", peer.Addr(), job.Index())
-
-				// We did get a valid response, and can break
-				// the loop.
-				break Loop
-
-			// If the timeout is reached before a valid response
-			// has been received, we exit with an error.
-			case <-timeout.C:
-				// The query did experience a timeout and will
-				// be given to someone else.
-				jobErr = ErrQueryTimeout
-				log.Debugf("Worker %v timeout for request %T "+
-					"with job index %v", peer.Addr(),
-					job.Req, job.Index())
-
-				job.HandleTimeOut(peer)
-
-				break Loop
-
-			// If the peer disconnects before giving us a valid
-			// answer, we'll also exit with an error.
-			case <-peer.OnDisconnect():
-				log.Debugf("Peer %v for worker disconnected, "+
-					"cancelling job %v", peer.Addr(),
-					job.Index())
-
-				jobErr = ErrPeerDisconnected
-				break Loop
-
-			// If the job was canceled, we report this back to the
-			// work manager.
-			case <-job.cancelChan:
-				log.Tracef("Worker %v job %v canceled",
-					peer.Addr(), job.Index())
-
-				jobErr = ErrJobCanceled
-				break Loop
-
-			case <-quit:
-				return
-			}
+			goto feedbackLoop
 		}
+	}
+feedbackLoop:
+	// Wait for the correct response to be received from the peer,
+	// or an error happening.
+	for {
+		select {
+		// A message was received from the peer, use the
+		// response handler to check whether it was answering
+		// our request.
+		case <-blkQuery.RespChan:
+			log.Debugf("Gotten message from %v for job index %v", peer.Addr(), job.Index())
 
+			// We did get a valid response, and can break
+			// the loop.
+			goto nextJobLoop
+
+		// If the timeout is reached before a valid response
+		// has been received, we exit with an error.
+		case <-timeout.C:
+			// The query did experience a timeout and will
+			// be given to someone else.
+			jobErr = ErrQueryTimeout
+			log.Debugf("Worker %v timeout for request %T "+
+				"with job index %v", peer.Addr(),
+				job.Req, job.Index())
+
+			job.HandleTimeOut(peer)
+
+		// If the peer disconnects before giving us a valid
+		// answer, we'll also exit with an error.
+		case <-peer.OnDisconnect():
+			log.Debugf("Peer %v for worker disconnected, "+
+				"cancelling job %v", peer.Addr(),
+				job.Index())
+
+			jobErr = ErrPeerDisconnected
+
+		// If the job was canceled, we report this back to the
+		// work manager.
+		case <-job.cancelChan:
+			log.Tracef("Worker %v job %v canceled",
+				peer.Addr(), job.Index())
+
+			jobErr = ErrJobCanceled
+
+		case <-quit:
+			return
+		}
 		// Stop to allow garbage collection.
 		timeout.Stop()
 		SendResultToWorkMgr(results, &TestJobResult{
@@ -426,7 +422,9 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 		if jobErr == ErrPeerDisconnected {
 			return
 		}
+		goto nextJobLoop
 	}
+
 }
 
 func SendResultToWorkMgr(results chan<- *TestJobResult,

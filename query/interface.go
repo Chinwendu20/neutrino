@@ -140,7 +140,7 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
-	TestQuery(reqs []*TestRequest, options ...QueryOption) chan error
+	TestQuery(reqs []*TestRequest, options ...QueryOption)
 }
 
 // Peer is the interface that defines the methods needed by the query package

@@ -549,7 +549,6 @@ func (w *WorkManager) testWorkDispatcher() {
 	type batchProgress struct {
 		timeout <-chan time.Time
 		rem     int
-		errChan chan error
 	}
 
 	// We set up a batch index counter to keep track of batches that still
@@ -560,11 +559,6 @@ func (w *WorkManager) testWorkDispatcher() {
 
 	// When the work dispatcher exits, we'll loop through the remaining
 	// batches and send on their error channel.
-	defer func() {
-		for _, b := range currentBatches {
-			b.errChan <- ErrWorkManagerShuttingDown
-		}
-	}()
 
 	// We set up a counter that we'll increase with each incoming query,
 	// and will serve as the priority of each. In addition we map each
@@ -715,8 +709,7 @@ func (w *WorkManager) testWorkDispatcher() {
 			}
 
 			currentBatches[batchIndex] = &batchProgress{
-				rem:     len(batch.requests),
-				errChan: batch.errChan,
+				rem: len(batch.requests),
 			}
 			batchIndex++
 		case <-w.quit:
@@ -759,24 +752,20 @@ type testbatch struct {
 }
 
 func (w *WorkManager) TestQuery(requests []*TestRequest,
-	options ...QueryOption) chan error {
+	options ...QueryOption) {
 	log.Debugf("Testing query")
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
-
-	errChan := make(chan error, 1)
 
 	// Add query messages to the queue of batches to handle.
 	select {
 	case w.test <- &testbatch{
 		requests: requests,
 		options:  qo,
-		errChan:  errChan,
 	}:
-
+		log.Debugf("Sending Testing query")
 	case <-w.quit:
 		log.Debugf("Inside test query and quiting")
-		errChan <- ErrWorkManagerShuttingDown
 	}
-	return nil
+
 }
