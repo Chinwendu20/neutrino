@@ -63,10 +63,11 @@ type jobResult struct {
 	err  error
 }
 
-type testJobResult struct {
-	job  *TestQueryJob
-	peer Peer
-	err  error
+type TestJobResult struct {
+	Job        *TestQueryJob
+	Peer       Peer
+	Err        error
+	UnFinished bool
 }
 
 // worker is responsible for polling work from its work queue, and handing it
@@ -177,6 +178,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 				peer.Addr(), job.Req, job.Index())
 
 			peer.QueueMessageWithEncoding(job.Req, nil, job.encoding)
+
 		}
 
 		// Wait for the correct response to be received from the peer,
@@ -288,14 +290,21 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	}
 }
 
-func (w *testWorker) Run(results chan<- *testJobResult, quit <-chan struct{}) {
+type BlkManagerQuery struct {
+	RespChan chan struct{}
+	Job      *TestQueryJob
+	Results  chan<- *TestJobResult
+}
+
+func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 
 	peer := w.peer
 	log.Infof("Testworker is running for, %v", peer.Addr())
-	// Subscribe to messages from the peer.
-	msgChan, cancel := peer.SubscribeRecvMsg()
-	defer cancel()
 
+	blkQuery := BlkManagerQuery{
+		RespChan: make(chan struct{}),
+		Results:  results,
+	}
 	for {
 		log.Debugf("Worker %v waiting for more work", peer.Addr())
 
@@ -340,6 +349,10 @@ func (w *testWorker) Run(results chan<- *testJobResult, quit <-chan struct{}) {
 					peer.Addr(), err)
 				return
 			}
+			blkQuery.Job = job
+			job.HandleResp(
+				peer, &blkQuery,
+			)
 
 		}
 
@@ -356,35 +369,8 @@ func (w *testWorker) Run(results chan<- *testJobResult, quit <-chan struct{}) {
 			// A message was received from the peer, use the
 			// response handler to check whether it was answering
 			// our request.
-			case resp := <-msgChan:
-				log.Debugf("Gotten message from %v", peer.Addr())
-				progress := job.HandleResp(resp, peer, job)
-
-				log.Debugf("Worker %v handled msg %T while "+
-					"waiting for response to %T (job=%v). "+
-					"Finished=%v, progressed=%v",
-					peer.Addr(), resp, job.Req, job.Index(),
-					progress.Finished, progress.Progressed)
-
-				// If the response did not answer our query, we
-				// check whether it did progress it.
-				if !progress.Finished {
-					// If it did make progress we reset the
-					// timeout. This ensures that the
-					// queries with multiple responses
-					// expected won't timeout before all
-					// responses have been handled.
-					// TODO(halseth): separate progress
-					// timeout value.
-					if progress.Progressed {
-						timeout.Stop()
-						timeout = time.NewTimer(
-							job.Timeout,
-						)
-					}
-
-					continue Loop
-				}
+			case <-blkQuery.RespChan:
+				log.Debugf("Gotten message from %v for job index %v", peer.Addr(), job.Index())
 
 				// We did get a valid response, and can break
 				// the loop.
@@ -399,6 +385,8 @@ func (w *testWorker) Run(results chan<- *testJobResult, quit <-chan struct{}) {
 				log.Debugf("Worker %v timeout for request %T "+
 					"with job index %v", peer.Addr(),
 					job.Req, job.Index())
+
+				job.HandleTimeOut(peer)
 
 				break Loop
 
@@ -428,26 +416,32 @@ func (w *testWorker) Run(results chan<- *testJobResult, quit <-chan struct{}) {
 
 		// Stop to allow garbage collection.
 		timeout.Stop()
-
-		// We have a result ready for the query, hand it off before
-		// getting a new job.
-
-		select {
-		case results <- &testJobResult{
-			job:  job,
-			peer: peer,
-			err:  jobErr,
-		}:
-			log.Debugf("Test -- Sent result to workmanager")
-		case <-quit:
-			return
-		}
+		SendResultToWorkMgr(results, &TestJobResult{
+			Job:  job,
+			Peer: peer,
+			Err:  jobErr,
+		}, quit)
 
 		// If the peer disconnected, we can exit immediately.
 		if jobErr == ErrPeerDisconnected {
 			return
 		}
 	}
+}
+
+func SendResultToWorkMgr(results chan<- *TestJobResult,
+	jobResult *TestJobResult, quit <-chan struct{}) {
+
+	// We have a result ready for the query, hand it off before
+	// getting a new job.
+
+	select {
+	case results <- jobResult:
+		log.Debugf("Test -- Sent result to workmanager")
+	case <-quit:
+		return
+	}
+
 }
 
 // NewJob returns a channel where work that is to be handled by the worker can

@@ -127,7 +127,9 @@ type TestRequest struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(resp wire.Message, peer TestPeer, testReq *TestQueryJob) Progress
+	HandleResp func(peer TestPeer, blkQuery *BlkManagerQuery)
+
+	HandleTimeOut func(peer TestPeer)
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
