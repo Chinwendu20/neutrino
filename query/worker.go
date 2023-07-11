@@ -308,9 +308,8 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 
 nextJobLoop:
 	var (
-		job     *TestQueryJob
-		jobErr  error
-		timeout *time.Timer
+		job    *TestQueryJob
+		jobErr error
 	)
 	for {
 		log.Debugf("Worker %v waiting for more work", peer.Addr())
@@ -359,7 +358,6 @@ nextJobLoop:
 			job.HandleResp(
 				peer, &blkQuery,
 			)
-			timeout = time.NewTimer(job.Timeout)
 			goto feedbackLoop
 		}
 	}
@@ -377,18 +375,6 @@ feedbackLoop:
 			// We did get a valid response, and can break
 			// the loop.
 			goto nextJobLoop
-
-		// If the timeout is reached before a valid response
-		// has been received, we exit with an error.
-		case <-timeout.C:
-			// The query did experience a timeout and will
-			// be given to someone else.
-			jobErr = ErrQueryTimeout
-			log.Debugf("Worker %v timeout for request %T "+
-				"with job index %v", peer.Addr(),
-				job.Req, job.Index())
-
-			job.HandleTimeOut(peer)
 
 		// If the peer disconnects before giving us a valid
 		// answer, we'll also exit with an error.
@@ -411,7 +397,7 @@ feedbackLoop:
 			return
 		}
 		// Stop to allow garbage collection.
-		timeout.Stop()
+
 		SendResultToWorkMgr(results, &TestJobResult{
 			Job:  job,
 			Peer: peer,

@@ -647,16 +647,6 @@ func (w *WorkManager) testWorkDispatcher() {
 					"rescheduling: %v", result.Job.Index(),
 					result.Peer.Addr(), result.Err)
 
-				// If it was a timeout, we dynamically increase
-				// it for the next attempt.
-				if result.Err == ErrQueryTimeout {
-					newTimeout := result.Job.Timeout * 2
-					if newTimeout > maxQueryTimeout {
-						newTimeout = maxQueryTimeout
-					}
-					result.Job.Timeout = newTimeout
-				}
-
 				heap.Push(testWork, result.Job)
 				currentQueries[result.Job.Index()] = batchNum
 
@@ -666,12 +656,18 @@ func (w *WorkManager) testWorkDispatcher() {
 				// Reward the peer for the successful query.
 				w.cfg.Ranking.Reward(result.Peer.Addr())
 				if result.UnFinished {
+					log.Debugf("Job %v is unfinished", result.Job.Index())
+					log.Debugf("Length of testWork before push %v", testWork.Len())
 					heap.Push(testWork, result.Job)
+					log.Debugf("Length of testWork after push %v", testWork.Len())
+					temp := testWork.Peek().(*TestQueryJob)
+					log.Debugf("First element in the heap: %v", temp.Index())
 					currentQueries[result.Job.Index()] = batchNum
 				}
+				log.Debugf("Job %v is Finished", result.Job.Index())
 				// Decrement the number of queries remaining in
 				// the batch.
-				if batch != nil {
+				if batch != nil && !result.UnFinished {
 					batch.rem--
 					log.Debugf("Remaining jobs for batch "+
 						"%v: %v ", batchNum, batch.rem)
@@ -681,7 +677,7 @@ func (w *WorkManager) testWorkDispatcher() {
 					// it finished, and delete it.
 					if batch.rem == 0 {
 
-						log.Tracef("Batch %v done",
+						log.Debugf("Batch %v done",
 							batchNum)
 						return
 					}

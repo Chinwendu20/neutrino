@@ -2240,7 +2240,11 @@ unCheckPtLoop:
 func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
 	peerQueryMap map[string]*query.BlkManagerQuery) {
 	peer := msg.peer.(*ServerPeer)
-
+	BlkManagerQuery, _ := peerQueryMap[peer.Addr()]
+	req := BlkManagerQuery.Job.Req.(*HeaderQuery)
+	log.Debugf("Peer=%v, start_height=%v, "+
+		"end_height=%v handling time out", peer.Addr(),
+		req.StartHeight, req.EndHeight)
 	delete(peerQueryMap, peer.Addr())
 
 }
@@ -2260,14 +2264,12 @@ func (b *blockManager) handleHdrQueryMsg(queryMap map[string]*query.BlkManagerQu
 	msg *HeadersMsg) {
 
 	BlkManagerQuery, ok := queryMap[msg.Peer.Addr()]
-	req := BlkManagerQuery.Job.Req.(*HeaderQuery)
 
 	if !ok {
-		log.Debugf("No Header query for peer=%v, start_height=%v, "+
-			"end_height=%v header message received", msg.Peer.Addr(),
-			req.StartHeight, req.EndHeight)
+		log.Debugf("No Header query for peer=%v", msg.Peer.Addr())
 		return
 	}
+	req := BlkManagerQuery.Job.Req.(*HeaderQuery)
 
 	if !msg.Peer.Connected() {
 		log.Debugf("Peer=%v, start_height=%v, "+
@@ -2307,8 +2309,9 @@ waitForNewEntry:
 	b.newResponseCheckptSignal.L.Lock()
 
 	for {
+		log.Debugf("Waiting for headerTip broadcast")
 		b.newResponseCheckptSignal.Wait()
-
+		log.Debugf("Gotten headerTip broadcast")
 		// While we're awake, we'll quickly check to see if we need to
 		// quit early.
 		select {
@@ -2318,10 +2321,11 @@ waitForNewEntry:
 
 		default:
 		}
-
+		b.newResponseCheckptSignal.L.Unlock()
 		b.newResponseCheckptMtx.RLock()
 		detailsToResponse, ok := b.responseCheckptMap[b.headerTipHash]
 		b.newResponseCheckptMtx.RUnlock()
+		log.Debugf("In the middle of header loop")
 		if !ok {
 			log.Debugf("Received non tip. Expected: "+
 				"height=%v, hash=%v", b.headerTip, b.headerTipHash)
@@ -2356,12 +2360,13 @@ waitForNewEntry:
 					"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
 				query.SendResultToWorkMgr(detailsToResponse.resultChan,
 					workMgrResult, b.quit)
-				return
+				goto waitForNewEntry
 			}
 			log.Debugf("Done with job"+
 				"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
 			query.SendResultToWorkMgr(detailsToResponse.resultChan,
 				workMgrResult, b.quit)
+			goto waitForNewEntry
 		}
 		workMgrResult.Err = errors.New("received invalid headers")
 
@@ -3430,7 +3435,6 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg, headerReq HeaderQuery)
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
 
-	log.Debugf("calcNextRequiredDifficulty ")
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
@@ -3441,7 +3445,7 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
 		Header: *blockHeader,
 	})
-	log.Debugf("CheckProofOfWork")
+
 	err = blockchain.CheckProofOfWork(stubBlock,
 		blockchain.CompactToBig(diff))
 	if err != nil {
