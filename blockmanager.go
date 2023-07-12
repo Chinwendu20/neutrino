@@ -2340,7 +2340,8 @@ waitForNewEntry:
 		initialTipHeight := b.headerTip
 		log.Debugf("Sent to handleheaders "+
 			"curheight=%v, curhash=%v", b.headerTip, b.headerTipHash)
-		b.handleHeadersMsg(detailsToResponse.response)
+		err := b.handleHeadersMsg(detailsToResponse.response)
+		log.Debugf("Got error: %v", err)
 		log.Debugf("Returned from handleheaders"+
 			"finalheight=%v, finalhash=%v", b.headerTip, b.headerTipHash)
 		finalTipHeight := b.headerTip
@@ -2356,6 +2357,18 @@ waitForNewEntry:
 				workMgrResult.UnFinished = true
 				req.StartHeight = int32(b.headerTip)
 				req.StartHash = b.headerTipHash
+
+				curLocator := make(blockchain.BlockLocator, 0,
+					wire.MaxBlockLocatorsPerMsg)
+				knownLocator, locErr := b.cfg.BlockHeaders.LatestBlockLocator()
+				if locErr == nil {
+					curLocator = append(curLocator, knownLocator...)
+				}
+
+				curLocator = append(curLocator, &b.headerTipHash)
+
+				// Add curLocator from the database as backup.
+
 				log.Debugf("Created new job"+
 					"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
 				query.SendResultToWorkMgr(detailsToResponse.resultChan,

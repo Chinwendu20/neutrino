@@ -143,11 +143,13 @@ func New(cfg *Config) *WorkManager {
 var testWork = &testWorkQueue{}
 var testWorkers = make(map[string]*activeWorker)
 var testRWMutex sync.RWMutex
+var testWorkRWMtx sync.Mutex
 
 // Start starts the WorkManager.
 func (w *WorkManager) Start() error {
 	heap.Init(testWork)
 	testRWMutex = sync.RWMutex{}
+	testWorkRWMtx = sync.Mutex{}
 	w.wg.Add(3)
 	go w.workDispatcher()
 	go w.testDistributeWork()
@@ -457,34 +459,40 @@ Loop:
 		// If the work queue is non-empty, we'll take out the first
 		// element in order to distribute it to a worker.
 		//TODO: Possible race conditon with testwork
-		next := testWork.Peek().(*TestQueryJob)
-		if next != nil && next.Index() == 1.1 {
-			log.Debugf("Gotten 1.1")
-		}
+		//next := testWork.Peek().(*TestQueryJob)
+		//if next != nil && next.Index() == 1.1 {
+		//	log.Debugf("Gotten 1.1")
+		//}
+
 		testRWMutex.RLock()
 		if testWork.Len() > 0 && len(testWorkers) > 0 {
 			testRWMutex.RUnlock()
 
+			testWorkRWMtx.Lock()
 			next := testWork.Peek().(*TestQueryJob)
 
 			// Find the peers with free work slots available.
 			var eligibleWorkers []string
 			testRWMutex.RLock()
 			for p, r := range testWorkers {
+				testRWMutex.RUnlock()
 
 				// Only one active job at a time is currently
 				// supported.
 				if r.testActiveJob != nil {
+					testRWMutex.RLock()
 					//log.Debugf("Uneligible worker: Peer has work already")
 					continue
 				}
 				if !r.tw.Peer().IsPeerBehindStartHeight(next.TestRequest) {
+					testRWMutex.RLock()
 					//log.Debugf("Uneligible worker: Peer behind")
 					continue
 
 				}
 				log.Debugf("Num eligible worker: %v", len(eligibleWorkers))
 				eligibleWorkers = append(eligibleWorkers, p)
+				testRWMutex.RLock()
 			}
 			testRWMutex.RUnlock()
 
@@ -506,7 +514,9 @@ Loop:
 				case r.tw.NewJob() <- next:
 					log.Debugf("Sent job %v to worker %v",
 						next.Index(), p)
+
 					heap.Pop(testWork)
+					testWorkRWMtx.Unlock()
 
 					r.testActiveJob = next
 
@@ -523,10 +533,12 @@ Loop:
 					continue
 
 				case <-w.quit:
+					testWorkRWMtx.Unlock()
 					return
 				}
 
 			}
+			testWorkRWMtx.Unlock()
 		} else {
 			testRWMutex.RUnlock()
 		}
@@ -662,7 +674,9 @@ func (w *WorkManager) testWorkDispatcher() {
 				if result.UnFinished {
 					log.Debugf("Job %v is unfinished", result.Job.Index())
 					log.Debugf("Length of testWork before push %v", testWork.Len())
+					testWorkRWMtx.Lock()
 					heap.Push(testWork, result.Job)
+					testWorkRWMtx.Unlock()
 					log.Debugf("Length of testWork after push %v", testWork.Len())
 					temp := testWork.Peek().(*TestQueryJob)
 					log.Debugf("First element in the heap: %v", temp.Index())
