@@ -457,6 +457,10 @@ Loop:
 		// If the work queue is non-empty, we'll take out the first
 		// element in order to distribute it to a worker.
 		//TODO: Possible race conditon with testwork
+		next := testWork.Peek().(*TestQueryJob)
+		if next != nil && next.Index() == 1.1 {
+			log.Debugf("Gotten 1.1")
+		}
 		testRWMutex.RLock()
 		if testWork.Len() > 0 && len(testWorkers) > 0 {
 			testRWMutex.RUnlock()
@@ -663,8 +667,9 @@ func (w *WorkManager) testWorkDispatcher() {
 					temp := testWork.Peek().(*TestQueryJob)
 					log.Debugf("First element in the heap: %v", temp.Index())
 					currentQueries[result.Job.Index()] = batchNum
+				} else {
+					log.Debugf("Job %v is Finished", result.Job.Index())
 				}
-				log.Debugf("Job %v is Finished", result.Job.Index())
 				// Decrement the number of queries remaining in
 				// the batch.
 				if batch != nil && !result.UnFinished {

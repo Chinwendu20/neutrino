@@ -2726,14 +2726,14 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 	}
 }
 
-func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
+func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) error {
 
 	msg := hmsg.Headers
 	numHeaders := len(msg.Headers)
 
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
-		return
+		return errors.New("empty headers")
 	}
 
 	// For checking to make sure blocks aren't too far in the future as of
@@ -2762,7 +2762,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 			log.Warnf("Header list does not contain a previous" +
 				"element as expected -- disconnecting peer")
 			hmsg.Peer.Disconnect()
-			return
+			return errors.New("no previous header in header list")
 		}
 
 		// Ensure the header properly connects to the previous one,
@@ -2776,10 +2776,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 			err := b.checkHeaderSanity(blockHeader, maxTimestamp,
 				false)
 			if err != nil {
-				log.Warnf("Header doesn't pass sanity check: "+
+				log.Debugf("Header doesn't pass sanity check: "+
 					"%s -- disconnecting peer", err)
 				hmsg.Peer.Disconnect()
-				return
+				return errors.New("header does not pass sanity check: %v")
 			}
 
 			node.Height = prevNode.Height + 1
@@ -2819,7 +2819,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 			// peer or disconnect the peer that sent us these bad
 			// headers.
 			if hmsg.Peer != b.SyncPeer() && !b.BlockHeadersSynced() {
-				return
+				return errors.New("reorging when not sync peer and chain not synced")
 			}
 
 			// Check if this is the last block we know of. This is
@@ -2852,7 +2852,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 					" peer %s (%s) -- disconnecting",
 					hmsg.Peer.Addr(), err)
 				hmsg.Peer.Disconnect()
-				return
+				return errors.New("Block header does not connect to chain")
 			}
 
 			// We've found a branch we weren't aware of. If the
@@ -2868,7 +2868,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 					"synchronized -- disconnecting peer "+
 					"%s", hmsg.Peer.Addr())
 				hmsg.Peer.Disconnect()
-				return
+				errors.New("reorging past a known received checkpoint")
 			}
 
 			// Check the sanity of the new branch. If any of the
@@ -2889,7 +2889,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 						" check: %s -- disconnecting "+
 						"peer", err)
 					hmsg.Peer.Disconnect()
-					return
+					return errors.New("header does not pass sanity check while reorging")
 				}
 				totalWork.Add(totalWork,
 					blockchain.CalcWork(reorgHeader.Bits))
@@ -2898,7 +2898,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 					Height: int32(backHeight+1) + int32(j),
 				})
 			}
-			log.Tracef("Sane reorg attempted. Total work from "+
+			log.Debugf("Sane reorg attempted. Total work from "+
 				"reorg chain: %v", totalWork)
 
 			// All the headers pass sanity checks. Now we calculate
@@ -2943,7 +2943,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 				hmsg.Peer.Disconnect()
 				fallthrough
 			case 0:
-				return
+				return errors.New("known work less than computed work")
 			default:
 			}
 
@@ -3017,7 +3017,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 				}
 
 				hmsg.Peer.Disconnect()
-				return
+				return errors.New("block header does not match checkpoint")
 			}
 			break
 		}
@@ -3033,7 +3033,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 		err := b.cfg.BlockHeaders.WriteHeaders(headerWriteBatch...)
 		if err != nil {
 			log.Errorf("Unable to write block headers: %v", err)
-			return
+			return errors.New("writing to storage failed")
 		}
 	}
 
@@ -3044,7 +3044,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
+	if (b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced()) && b.nextCheckpoint == nil {
+		log.Debugf("Pushing get headers in handleheaders message")
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
@@ -3054,7 +3055,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.Peer.Addr(), err)
-			return
+			return errors.New("pushing sendgetheaders failed")
 		}
 	}
 
@@ -3066,6 +3067,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 	b.headerTipHash = *finalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
+	return nil
 }
 
 func (b *blockManager) writeHeaderBatch(headerWriteBatch []headerfs.BlockHeader,
