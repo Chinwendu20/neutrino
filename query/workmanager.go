@@ -48,7 +48,7 @@ type Worker interface {
 	// been closed).
 	NewJob() chan<- *queryJob
 
-	Peer() TestPeer
+	Peer() BlkHdrPeer
 }
 
 // PeerRanking is an interface that must be satisfied by the underlying module
@@ -99,7 +99,7 @@ type Config struct {
 	// give work to.
 	Ranking PeerRanking
 
-	TestNewWorker func(TestPeer) *testWorker
+	TestNewWorker func(BlkHdrPeer) *testWorker
 }
 
 // WorkManager is the main access point for outside callers, and satisfies the
@@ -141,7 +141,13 @@ func New(cfg *Config) *WorkManager {
 }
 
 var testWork = &testWorkQueue{}
-var testWorkers = make(map[string]*activeWorker)
+
+type testActiveWorker struct {
+	onExit chan struct{}
+	tw     *testWorker
+}
+
+var testWorkers = make(map[string]*testActiveWorker)
 var testRWMutex sync.RWMutex
 var testWorkRWMtx sync.Mutex
 
@@ -152,7 +158,7 @@ func (w *WorkManager) Start() error {
 	testWorkRWMtx = sync.Mutex{}
 	w.wg.Add(3)
 	go w.workDispatcher()
-	go w.testDistributeWork()
+	go w.distributeBlkHeaderWork()
 	go w.testWorkDispatcher()
 
 	return nil
@@ -446,24 +452,16 @@ Loop:
 	}
 }
 
-// Init a work queue which will be used to sort the incoming queries in
-// a first come first served fashion. We use a heap structure such
-// that we can efficiently put failed queries back in the queue.
-
-func (w *WorkManager) testDistributeWork() {
+// distributeBlkHeaderWork distributes getheader work gotten from the
+// blkHeaderDispatcher
+func (w *WorkManager) distributeBlkHeaderWork() {
 	defer w.wg.Done()
 
 Loop:
 	for {
 
-		// If the work queue is non-empty, we'll take out the first
-		// element in order to distribute it to a worker.
-		//TODO: Possible race conditon with testwork
-		//next := testWork.Peek().(*TestQueryJob)
-		//if next != nil && next.Index() == 1.1 {
-		//	log.Debugf("Gotten 1.1")
-		//}
-
+		// If there is work to be distributed and there are workers
+		// to distribute it, begin the process of dispatching th
 		testRWMutex.RLock()
 		if testWork.Len() > 0 && len(testWorkers) > 0 {
 			testRWMutex.RUnlock()
@@ -479,7 +477,7 @@ Loop:
 
 				// Only one active job at a time is currently
 				// supported.
-				if r.testActiveJob != nil {
+				if r.tw.activeJob {
 					testRWMutex.RLock()
 					//log.Debugf("Uneligible worker: Peer has work already")
 					continue
@@ -518,7 +516,7 @@ Loop:
 					heap.Pop(testWork)
 					testWorkRWMtx.Unlock()
 
-					r.testActiveJob = next
+					r.tw.activeJob = true
 
 					// Go back to start of loop, to check
 					// if there are more jobs to
@@ -547,6 +545,7 @@ Loop:
 }
 
 // TODO(maureen): Remove
+// This dispatcher handles fetching block headers within the checkpointed range
 func (w *WorkManager) testWorkDispatcher() {
 	log.Infof("Inside testWorkDispatcher")
 	defer w.wg.Done()
@@ -592,7 +591,7 @@ func (w *WorkManager) testWorkDispatcher() {
 		// Spin up a goroutine that runs a worker each time a peer
 		// connects.
 		case peer := <-peersConnected:
-			testPeer, _ := peer.(TestPeer)
+			testPeer, _ := peer.(BlkHdrPeer)
 
 			r := w.cfg.TestNewWorker(testPeer)
 			log.Debugf("-------- ------Into it ! %v",
@@ -604,10 +603,9 @@ func (w *WorkManager) testWorkDispatcher() {
 			log.Debugf("About to be locked in peers connected",
 				peer.Addr())
 			testRWMutex.Lock()
-			testWorkers[peer.Addr()] = &activeWorker{
-				tw:        *r,
-				activeJob: nil,
-				onExit:    onExit,
+			testWorkers[peer.Addr()] = &testActiveWorker{
+				tw:     r,
+				onExit: onExit,
 			}
 			testRWMutex.Unlock()
 			log.Debugf("Added peer %v in workers map",
@@ -634,7 +632,7 @@ func (w *WorkManager) testWorkDispatcher() {
 			testRWMutex.RLock()
 			r := testWorkers[result.Peer.Addr()]
 			testRWMutex.RUnlock()
-			r.testActiveJob = nil
+			r.tw.activeJob = false
 
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have

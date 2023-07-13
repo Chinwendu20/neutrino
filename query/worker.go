@@ -83,9 +83,11 @@ type worker struct {
 }
 
 type testWorker struct {
-	peer TestPeer
+	peer BlkHdrPeer
 
 	nextJob chan *TestQueryJob
+
+	activeJob bool
 }
 
 // A compile-time check to ensure worker satisfies the Worker interface.
@@ -99,15 +101,16 @@ func NewWorker(peer Peer) Worker {
 	}
 }
 
-func (w *worker) Peer() TestPeer {
+func (w *worker) Peer() BlkHdrPeer {
 
 	return nil
 }
 
-func TestNewWorker(peer TestPeer) *testWorker {
+func TestNewWorker(peer BlkHdrPeer) *testWorker {
 	return &testWorker{
-		peer:    peer,
-		nextJob: make(chan *TestQueryJob),
+		peer:      peer,
+		nextJob:   make(chan *TestQueryJob),
+		activeJob: false,
 	}
 }
 
@@ -121,7 +124,7 @@ func TestNewWorker(peer TestPeer) *testWorker {
 //
 // NOTE: Part of the Worker interface.
 
-func (w *testWorker) Peer() TestPeer {
+func (w *testWorker) Peer() BlkHdrPeer {
 
 	return w.peer
 }
@@ -345,7 +348,7 @@ nextJobLoop:
 
 		// We received a non-canceled query job, send it to the peer.
 		default:
-			log.Tracef("Worker %v queuing job %T with index %v",
+			log.Debugf("Worker %v queuing job %T with index %v",
 				peer.Addr(), job.Req, job.Index())
 
 			err := peer.QueryGetHeadersMsg(job.Req)
@@ -371,6 +374,7 @@ feedbackLoop:
 		// our request.
 		case <-blkQuery.RespChan:
 			log.Debugf("Gotten message from %v for job index %v", peer.Addr(), job.Index())
+			w.activeJob = true
 
 			// We did get a valid response, and can break
 			// the loop.

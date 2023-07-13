@@ -78,7 +78,7 @@ type donePeerMsg struct {
 }
 
 type checkPtQuery struct {
-	peer            query.TestPeer
+	peer            query.BlkHdrPeer
 	BlkManagerQuery *query.BlkManagerQuery
 }
 
@@ -89,7 +89,7 @@ type respDetail struct {
 }
 
 type timedOutMsg struct {
-	peer query.TestPeer
+	peer query.BlkHdrPeer
 }
 
 // blockManagerCfg holds options and dependencies needed by the blockManager
@@ -1006,7 +1006,7 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.TestRequest {
 	return reqs
 }
 
-func (c *CheckpointedBlockHeadersQuery) handleTimeOut(peer query.TestPeer) {
+func (c *CheckpointedBlockHeadersQuery) handleTimeOut(peer query.BlkHdrPeer) {
 	select {
 	case c.blockMgr.peerChan <- &timedOutMsg{peer: peer}:
 	case <-c.blockMgr.quit:
@@ -1016,7 +1016,7 @@ func (c *CheckpointedBlockHeadersQuery) handleTimeOut(peer query.TestPeer) {
 
 // handleResponse is the internal response handler used for requests for this
 // block Headers query.
-func (c *CheckpointedBlockHeadersQuery) handleResponse(peer query.TestPeer,
+func (c *CheckpointedBlockHeadersQuery) handleResponse(peer query.BlkHdrPeer,
 	blkQuery *query.BlkManagerQuery) {
 	select {
 	case c.blockMgr.peerChan <- &checkPtQuery{peer: peer,
@@ -2353,20 +2353,20 @@ waitForNewEntry:
 		req := workMgrResult.Job.Req.(*HeaderQuery)
 		if initialTipHeight != finalTipHeight {
 			if finalTipHeight != uint32(req.EndHeight) {
-				workMgrResult.Job.TestIndex = detailsToResponse.job.TestIndex + 0.1
+				workMgrResult.Job.TestIndex = detailsToResponse.job.TestIndex + 0.0005
 				workMgrResult.UnFinished = true
 				req.StartHeight = int32(b.headerTip)
 				req.StartHash = b.headerTipHash
 
 				curLocator := make(blockchain.BlockLocator, 0,
 					wire.MaxBlockLocatorsPerMsg)
+				curLocator = append(curLocator, &b.headerTipHash)
 				knownLocator, locErr := b.cfg.BlockHeaders.LatestBlockLocator()
 				if locErr == nil {
 					curLocator = append(curLocator, knownLocator...)
 				}
 
-				curLocator = append(curLocator, &b.headerTipHash)
-
+				req.Locator = curLocator
 				// Add curLocator from the database as backup.
 
 				log.Debugf("Created new job"+

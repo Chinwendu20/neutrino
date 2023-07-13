@@ -540,7 +540,7 @@ func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
 	if !ok {
 		return errors.New("request is not type HeaderQuery")
 	}
-
+	log.Debugf("Querygetheaders pushing headers message")
 	err := sp.PushGetHeadersMsg(queryGetHeaders.Locator, queryGetHeaders.StopHash)
 
 	if err != nil {

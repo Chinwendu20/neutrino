@@ -127,9 +127,9 @@ type TestRequest struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(peer TestPeer, blkQuery *BlkManagerQuery)
+	HandleResp func(peer BlkHdrPeer, blkQuery *BlkManagerQuery)
 
-	HandleTimeOut func(peer TestPeer)
+	HandleTimeOut func(peer BlkHdrPeer)
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
@@ -165,26 +165,15 @@ type Peer interface {
 	OnDisconnect() <-chan struct{}
 }
 
-type TestPeer interface {
-	// QueueMessageWithEncoding adds the passed bitcoin message to the peer
-	// send queue.
-	QueueMessageWithEncoding(msg wire.Message, doneChan chan<- struct{},
-		encoding wire.MessageEncoding)
+// BlkHdrPeer is the interface that defines the methods needed by the query package
+// to be able to make getheader requests and receive responses from a network peer
+type BlkHdrPeer interface {
+	Peer
 
-	// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
-	// messages received from this peer will be sent on the returned
-	// channel. A closure is also returned, that should be called to cancel
-	// the subscription.
-	SubscribeRecvMsg() (<-chan wire.Message, func())
-
-	// Addr returns the address of this peer.
-	Addr() string
-
-	// OnDisconnect returns a channel that will be closed when this peer is
-	// disconnected.
-	OnDisconnect() <-chan struct{}
-
+	// QueryGetHeadersMsg sends the getheaders message to the peer
 	QueryGetHeadersMsg(req interface{}) error
 
+	// IsPeerBehindStartHeight checks if the peer's height is behind
+	// the chain's highest height
 	IsPeerBehindStartHeight(req interface{}) bool
 }
