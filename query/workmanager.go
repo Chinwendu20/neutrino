@@ -78,8 +78,8 @@ type activeWorker struct {
 	w             Worker
 	activeJob     *queryJob
 	onExit        chan struct{}
-	testActiveJob *TestQueryJob
-	tw            testWorker
+	testActiveJob *BlkHdrQueryJob
+	tw            blkHdrWorker
 }
 
 // Config holds the configuration options for a new WorkManager.
@@ -99,7 +99,7 @@ type Config struct {
 	// give work to.
 	Ranking PeerRanking
 
-	TestNewWorker func(BlkHdrPeer) *testWorker
+	NewBlkHdrWorker func(BlkHdrPeer) *blkHdrWorker
 }
 
 // WorkManager is the main access point for outside callers, and satisfies the
@@ -116,13 +116,12 @@ type WorkManager struct {
 	// workers will be sent.
 	jobResults chan *jobResult
 
-	//TODO(maureen): remove
-	test      chan *testbatch
-	NewWorker func(Peer) Worker
+	getHdrBatch chan *blkHdrBatch
+	NewWorker   func(Peer) Worker
 
-	quit           chan struct{}
-	wg             sync.WaitGroup
-	testJobResults chan *TestJobResult
+	quit          chan struct{}
+	wg            sync.WaitGroup
+	HdrJobResults chan *BlkHdrJobResult
 }
 
 // Compile time check to ensure WorkManager satisfies the Dispatcher interface.
@@ -131,12 +130,12 @@ var _ Dispatcher = (*WorkManager)(nil)
 // New returns a new WorkManager with the regular worker implementation.
 func New(cfg *Config) *WorkManager {
 	return &WorkManager{
-		cfg:            cfg,
-		newBatches:     make(chan *batch),
-		jobResults:     make(chan *jobResult),
-		quit:           make(chan struct{}),
-		test:           make(chan *testbatch),
-		testJobResults: make(chan *TestJobResult),
+		cfg:           cfg,
+		newBatches:    make(chan *batch),
+		jobResults:    make(chan *jobResult),
+		quit:          make(chan struct{}),
+		getHdrBatch:   make(chan *blkHdrBatch),
+		HdrJobResults: make(chan *BlkHdrJobResult),
 	}
 }
 
@@ -144,7 +143,7 @@ var testWork = &testWorkQueue{}
 
 type testActiveWorker struct {
 	onExit chan struct{}
-	tw     *testWorker
+	tw     *blkHdrWorker
 }
 
 var testWorkers = make(map[string]*testActiveWorker)
@@ -467,7 +466,7 @@ Loop:
 			testRWMutex.RUnlock()
 
 			testWorkRWMtx.Lock()
-			next := testWork.Peek().(*TestQueryJob)
+			next := testWork.Peek().(*BlkHdrQueryJob)
 
 			// Find the peers with free work slots available.
 			var eligibleWorkers []string
@@ -482,7 +481,7 @@ Loop:
 					//log.Debugf("Uneligible worker: Peer has work already")
 					continue
 				}
-				if !r.tw.Peer().IsPeerBehindStartHeight(next.TestRequest) {
+				if !r.tw.Peer().IsPeerBehindStartHeight(next.BlkHdrRequest) {
 					testRWMutex.RLock()
 					//log.Debugf("Uneligible worker: Peer behind")
 					continue
@@ -593,7 +592,7 @@ func (w *WorkManager) testWorkDispatcher() {
 		case peer := <-peersConnected:
 			testPeer, _ := peer.(BlkHdrPeer)
 
-			r := w.cfg.TestNewWorker(testPeer)
+			r := w.cfg.NewBlkHdrWorker(testPeer)
 			log.Debugf("-------- ------Into it ! %v",
 				peer.Addr())
 			// We'll create a channel that will close after the
@@ -618,11 +617,11 @@ func (w *WorkManager) testWorkDispatcher() {
 				defer w.wg.Done()
 				defer close(onExit)
 
-				r.Run(w.testJobResults, w.quit)
+				r.Run(w.HdrJobResults, w.quit)
 			}()
 
 		// A new result came back.
-		case result := <-w.testJobResults:
+		case result := <-w.HdrJobResults:
 			log.Debugf("Test -- Result for job %v received from peer %v "+
 				"(err=%v)", result.Job.Index(),
 				result.Peer.Addr(), result.Err)
@@ -676,7 +675,7 @@ func (w *WorkManager) testWorkDispatcher() {
 					heap.Push(testWork, result.Job)
 					testWorkRWMtx.Unlock()
 					log.Debugf("Length of testWork after push %v", testWork.Len())
-					temp := testWork.Peek().(*TestQueryJob)
+					temp := testWork.Peek().(*BlkHdrQueryJob)
 					log.Debugf("First element in the heap: %v", temp.Index())
 					currentQueries[result.Job.Index()] = batchNum
 				} else {
@@ -702,20 +701,20 @@ func (w *WorkManager) testWorkDispatcher() {
 			}
 
 		// A new batch of queries where scheduled.
-		case batch := <-w.test:
+		case batch := <-w.getHdrBatch:
 			// Add all new queries in the batch to our work queue,
 			// with priority given by the order they were
 			// scheduled.
-			log.Debugf("Adding new test batch(%d) of %d queries to "+
+			log.Debugf("Adding new getHdrBatch batch(%d) of %d queries to "+
 				"work queue", batchIndex, len(batch.requests))
 
 			for _, q := range batch.requests {
-				heap.Push(testWork, &TestQueryJob{
-					TestIndex:   queryIndex,
-					Timeout:     minQueryTimeout,
-					encoding:    batch.options.encoding,
-					cancelChan:  batch.options.cancelChan,
-					TestRequest: q,
+				heap.Push(testWork, &BlkHdrQueryJob{
+					JobIndex:      queryIndex,
+					Timeout:       minQueryTimeout,
+					encoding:      batch.options.encoding,
+					cancelChan:    batch.options.cancelChan,
+					BlkHdrRequest: q,
 				})
 				currentQueries[queryIndex] = batchIndex
 				queryIndex++
@@ -758,13 +757,13 @@ func (w *WorkManager) Query(requests []*Request,
 	return errChan
 }
 
-type testbatch struct {
-	requests []*TestRequest
+type blkHdrBatch struct {
+	requests []*BlkHdrRequest
 	options  *queryOptions
 	errChan  chan error
 }
 
-func (w *WorkManager) TestQuery(requests []*TestRequest,
+func (w *WorkManager) GetHeaderQuery(requests []*BlkHdrRequest,
 	options ...QueryOption) {
 	log.Debugf("Testing query")
 	qo := defaultQueryOptions()
@@ -772,13 +771,13 @@ func (w *WorkManager) TestQuery(requests []*TestRequest,
 
 	// Add query messages to the queue of batches to handle.
 	select {
-	case w.test <- &testbatch{
+	case w.getHdrBatch <- &blkHdrBatch{
 		requests: requests,
 		options:  qo,
 	}:
 		log.Debugf("Sending Testing query")
 	case <-w.quit:
-		log.Debugf("Inside test query and quiting")
+		log.Debugf("Inside getHdrBatch query and quiting")
 	}
 
 }

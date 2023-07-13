@@ -31,19 +31,23 @@ type queryJob struct {
 	*Request
 }
 
-// TODO(Maureen): Remove!!
-type TestQueryJob struct {
-	TestIndex  float64
+// BlkHdrQueryJob is the internal struct that wraps the Query to work on, in
+// addition to some information about the query.
+type BlkHdrQueryJob struct {
+	JobIndex   float64
 	Timeout    time.Duration
 	encoding   wire.MessageEncoding
 	cancelChan <-chan struct{}
-	*TestRequest
+	*BlkHdrRequest
 }
 
-// queryJob should satisfy the Task interface in order to be sorted by the
+// BlkHdrQueryJob should satisfy the Task interface in order to be sorted by the
 // workQueue.
 var _ Task = (*queryJob)(nil)
-var _ TestTask = (*TestQueryJob)(nil)
+
+// queryJob should satisfy the BlkHdrTask interface in order to be sorted by the
+// workQueue.
+var _ BlkHdrTask = (*BlkHdrQueryJob)(nil)
 
 // Index returns the queryJob's index within the work queue.
 //
@@ -52,8 +56,8 @@ func (q *queryJob) Index() uint64 {
 	return q.index
 }
 
-func (q *TestQueryJob) Index() float64 {
-	return q.TestIndex
+func (q *BlkHdrQueryJob) Index() float64 {
+	return q.JobIndex
 }
 
 // jobResult is the final result of the worker's handling of the queryJob.
@@ -63,8 +67,9 @@ type jobResult struct {
 	err  error
 }
 
-type TestJobResult struct {
-	Job        *TestQueryJob
+// BlkHdrJobResult is the final result of the worker's handling of the BlkHdrQueryJob.
+type BlkHdrJobResult struct {
+	Job        *BlkHdrQueryJob
 	Peer       Peer
 	Err        error
 	UnFinished bool
@@ -82,10 +87,12 @@ type worker struct {
 	nextJob chan *queryJob
 }
 
-type testWorker struct {
+// blkHdrWorker is responsible for polling work from its work queue.
+// It interfaces between the work manager and block manager
+type blkHdrWorker struct {
 	peer BlkHdrPeer
 
-	nextJob chan *TestQueryJob
+	nextJob chan *BlkHdrQueryJob
 
 	activeJob bool
 }
@@ -106,12 +113,19 @@ func (w *worker) Peer() BlkHdrPeer {
 	return nil
 }
 
-func TestNewWorker(peer BlkHdrPeer) *testWorker {
-	return &testWorker{
+// NewBlkHdrWorker creates a new blkHdrWorker associated with the given peer.
+func NewBlkHdrWorker(peer BlkHdrPeer) *blkHdrWorker {
+	return &blkHdrWorker{
 		peer:      peer,
-		nextJob:   make(chan *TestQueryJob),
+		nextJob:   make(chan *BlkHdrQueryJob),
 		activeJob: false,
 	}
+}
+
+// Peer returns the peer of the worker
+func (w *blkHdrWorker) Peer() BlkHdrPeer {
+
+	return w.peer
 }
 
 // Run starts the worker. The worker will supply its peer with queries, and
@@ -123,12 +137,6 @@ func TestNewWorker(peer BlkHdrPeer) *testWorker {
 // until the peer disconnects or the worker is told to quit.
 //
 // NOTE: Part of the Worker interface.
-
-func (w *testWorker) Peer() BlkHdrPeer {
-
-	return w.peer
-}
-
 func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	peer := w.peer
 
@@ -293,16 +301,26 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	}
 }
 
+// BlkManagerQuery contains fields required for
+// communication between the blockmanager and
+// the worker and workmanager
 type BlkManagerQuery struct {
 	RespChan chan struct{}
-	Job      *TestQueryJob
-	Results  chan<- *TestJobResult
+	Job      *BlkHdrQueryJob
+	Results  chan<- *BlkHdrJobResult
 }
 
-func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
+// Run starts the worker. The worker will supply its peer with queries, and
+// notifies the block manager of the query as well. As soon as the worker receives
+// a heaer response for its previous query, it goes to polling for more work.
+//
+// The method is blocking, and should be started in a goroutine. It will run
+// until the peer disconnects or the worker is told to quit.
+
+func (w *blkHdrWorker) Run(results chan<- *BlkHdrJobResult, quit <-chan struct{}) {
 
 	peer := w.peer
-	log.Infof("Testworker is running for, %v", peer.Addr())
+	log.Infof("blkHdrWorker is running for, %v", peer.Addr())
 
 	blkQuery := BlkManagerQuery{
 		RespChan: make(chan struct{}),
@@ -311,7 +329,7 @@ func (w *testWorker) Run(results chan<- *TestJobResult, quit <-chan struct{}) {
 
 nextJobLoop:
 	var (
-		job    *TestQueryJob
+		job    *BlkHdrQueryJob
 		jobErr error
 	)
 	for {
@@ -349,35 +367,35 @@ nextJobLoop:
 		// We received a non-canceled query job, send it to the peer.
 		default:
 			log.Debugf("Worker %v queuing job %T with index %v",
-				peer.Addr(), job.Req, job.Index())
+				peer.Addr(), job.ReqDetails, job.Index())
 
-			err := peer.QueryGetHeadersMsg(job.Req)
+			err := peer.QueryGetHeadersMsg(job.ReqDetails)
 			if err != nil {
 				log.Debugf("Peer %v could not push GetHeaders Msg: %v",
 					peer.Addr(), err)
 				return
 			}
 			blkQuery.Job = job
-			job.HandleResp(
+			job.SendToQueryBlkMgr(
 				peer, &blkQuery,
 			)
 			goto feedbackLoop
 		}
 	}
+
+	//	Loop to wait from feedback from block manager
 feedbackLoop:
 	// Wait for the correct response to be received from the peer,
 	// or an error happening.
 	for {
 		select {
-		// A message was received from the peer, use the
-		// response handler to check whether it was answering
-		// our request.
+		// A header has been received for the query.
 		case <-blkQuery.RespChan:
-			log.Debugf("Gotten message from %v for job index %v", peer.Addr(), job.Index())
+			log.Debugf("Header received peer=%v for job index %v", peer.Addr(), job.Index())
 			w.activeJob = true
 
-			// We did get a valid response, and can break
-			// the loop.
+			// We did get a header, so we go back to fetching for
+			// more work
 			goto nextJobLoop
 
 		// If the peer disconnects before giving us a valid
@@ -402,7 +420,8 @@ feedbackLoop:
 		}
 		// Stop to allow garbage collection.
 
-		SendResultToWorkMgr(results, &TestJobResult{
+		//Send error result from worker to workManager.
+		SendResultToWorkMgr(results, &BlkHdrJobResult{
 			Job:  job,
 			Peer: peer,
 			Err:  jobErr,
@@ -412,13 +431,17 @@ feedbackLoop:
 		if jobErr == ErrPeerDisconnected {
 			return
 		}
+		// If it is not a peer disconnect continue polling for work
 		goto nextJobLoop
 	}
 
 }
 
-func SendResultToWorkMgr(results chan<- *TestJobResult,
-	jobResult *TestJobResult, quit <-chan struct{}) {
+// SendResultToWorkMgr sends feedback to the workmanager, letting it know if it was successful
+// or not. It is called by the worker if there are no errors and by the blockmanager if there
+// are errors.
+func SendResultToWorkMgr(results chan<- *BlkHdrJobResult,
+	jobResult *BlkHdrJobResult, quit <-chan struct{}) {
 
 	// We have a result ready for the query, hand it off before
 	// getting a new job.
@@ -442,7 +465,11 @@ func (w *worker) NewJob() chan<- *queryJob {
 	return w.nextJob
 }
 
-func (w *testWorker) NewJob() chan<- *TestQueryJob {
+// NewJob returns a channel where work that is to be handled by the worker can
+// be sent. If the worker reads a BlkHdrQueryJob  from this channel, it is guaranteed
+// that a response will eventually be delivered on the results channel (except
+// when the quit channel has been closed).
+func (w *blkHdrWorker) NewJob() chan<- *BlkHdrQueryJob {
 
 	return w.nextJob
 }

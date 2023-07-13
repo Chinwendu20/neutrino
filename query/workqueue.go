@@ -56,7 +56,7 @@ func (w *workQueue) Peek() interface{} {
 	return w.tasks[0]
 }
 
-type TestTask interface {
+type BlkHdrTask interface {
 	// Index returns this Task's index in the work queue.
 	Index() float64
 }
@@ -64,7 +64,7 @@ type TestTask interface {
 // workQueue is struct implementing the heap interface, and is used to keep a
 // list of remaining queryTasks in order.
 type testWorkQueue struct {
-	tasks []TestTask
+	tasks []BlkHdrTask
 }
 
 // Len returns the number of nodes in the priority queue.
@@ -91,7 +91,7 @@ func (w *testWorkQueue) Swap(i, j int) {
 //
 // NOTE: This is part of the heap.Interface implementation.
 func (w *testWorkQueue) Push(x interface{}) {
-	w.tasks = append(w.tasks, x.(TestTask))
+	w.tasks = append(w.tasks, x.(BlkHdrTask))
 }
 
 // Peek returns the first item in the queue.

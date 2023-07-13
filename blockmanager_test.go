@@ -365,7 +365,7 @@ package neutrino
 //
 //			var msgs []wire.Message
 //			for _, q := range requests {
-//				msgs = append(msgs, q.Req)
+//				msgs = append(msgs, q.ReqDetails)
 //			}
 //
 //			responses, err := generateResponses(msgs, headers)
@@ -619,7 +619,7 @@ package neutrino
 //
 //			var msgs []wire.Message
 //			for _, q := range requests {
-//				msgs = append(msgs, q.Req)
+//				msgs = append(msgs, q.ReqDetails)
 //			}
 //			responses, err := generateResponses(msgs, headers)
 //			if err != nil {

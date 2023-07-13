@@ -92,7 +92,7 @@ type testCtx struct {
 	workerDone chan struct{}
 }
 
-// startWorker creates and starts a worker for a new mockPeer. A test context
+// startWorker creates and starts a worker for a new mockPeer. A getHdrBatch context
 // containing channels to hand the worker new jobs and receiving the job
 // results, in addition to the mockPeer, is returned.
 func startWorker() (*testCtx, error) {

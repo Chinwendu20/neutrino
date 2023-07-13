@@ -532,13 +532,12 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	}
 }
 
-// TODO: Unexport HeaderQuery
 func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
 
-	queryGetHeaders, ok := req.(*HeaderQuery)
+	queryGetHeaders, ok := req.(*headerQuery)
 
 	if !ok {
-		return errors.New("request is not type HeaderQuery")
+		return errors.New("request is not type headerQuery")
 	}
 	log.Debugf("Querygetheaders pushing headers message")
 	err := sp.PushGetHeadersMsg(queryGetHeaders.Locator, queryGetHeaders.StopHash)
@@ -551,9 +550,9 @@ func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
 }
 
 func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {
-	queryGetHeaders, ok := req.(*HeaderQuery)
+	queryGetHeaders, ok := req.(*headerQuery)
 	if !ok {
-		log.Tracef("request is not type HeaderQuery")
+		log.Tracef("request is not type headerQuery")
 
 		return true
 	}
@@ -777,10 +776,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
 	s.workManager = query.New(&query.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
-		Ranking:        query.NewPeerRanking(),
-		TestNewWorker:  query.TestNewWorker,
+		ConnectedPeers:  s.ConnectedPeers,
+		NewWorker:       query.NewWorker,
+		Ranking:         query.NewPeerRanking(),
+		NewBlkHdrWorker: query.NewBlkHdrWorker,
 	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,

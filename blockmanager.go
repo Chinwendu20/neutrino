@@ -83,9 +83,9 @@ type checkPtQuery struct {
 }
 
 type respDetail struct {
-	job        *query.TestQueryJob
+	job        *query.BlkHdrQueryJob
 	response   *HeadersMsg
-	resultChan chan<- *query.TestJobResult
+	resultChan chan<- *query.BlkHdrJobResult
 }
 
 type timedOutMsg struct {
@@ -971,7 +971,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	}
 }
 
-type HeaderQuery struct {
+type headerQuery struct {
 	Locator     blockchain.BlockLocator
 	StopHash    *chainhash.Hash
 	StartHeight int32
@@ -981,26 +981,26 @@ type HeaderQuery struct {
 
 type extendedHeaderMsg struct {
 	HeadersMsg
-	HeaderQuery
+	headerQuery
 }
 
 // CheckpointedBlockHeadersQuery holds all information necessary to perform and
 // handle a query for checkpointed block headers.
 type CheckpointedBlockHeadersQuery struct {
 	blockMgr   *blockManager
-	msgs       []*HeaderQuery
+	msgs       []*headerQuery
 	headerChan chan extendedHeaderMsg
 }
 
-func (c *CheckpointedBlockHeadersQuery) requests() []*query.TestRequest {
+func (c *CheckpointedBlockHeadersQuery) requests() []*query.BlkHdrRequest {
 
 	log.Debugf("Creating test request")
-	reqs := make([]*query.TestRequest, len(c.msgs))
+	reqs := make([]*query.BlkHdrRequest, len(c.msgs))
 	for idx, m := range c.msgs {
-		reqs[idx] = &query.TestRequest{
-			Req:           m,
-			HandleResp:    c.handleResponse,
-			HandleTimeOut: c.handleTimeOut,
+		reqs[idx] = &query.BlkHdrRequest{
+			ReqDetails:        m,
+			SendToQueryBlkMgr: c.handleResponse,
+			HandleTimeOut:     c.handleTimeOut,
 		}
 	}
 	return reqs
@@ -1032,7 +1032,7 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
 
-	var queryMsgs []*HeaderQuery
+	var queryMsgs []*headerQuery
 	//initialBlockHeader := tipHeader
 
 	checkpoints := b.cfg.ChainParams.Checkpoints
@@ -1065,7 +1065,7 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 			curLocator = append(curLocator, knownLocator...)
 		}
 
-		queryMsg := &HeaderQuery{
+		queryMsg := &headerQuery{
 			Locator:     curLocator,
 			StopHash:    endHash,
 			StartHeight: int32(curHeight),
@@ -1111,7 +1111,7 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
-	go b.cfg.QueryDispatcher.TestQuery(
+	go b.cfg.QueryDispatcher.GetHeaderQuery(
 		q.requests(), query.Cancel(b.quit),
 	)
 
@@ -2241,7 +2241,7 @@ func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
 	peerQueryMap map[string]*query.BlkManagerQuery) {
 	peer := msg.peer.(*ServerPeer)
 	BlkManagerQuery, _ := peerQueryMap[peer.Addr()]
-	req := BlkManagerQuery.Job.Req.(*HeaderQuery)
+	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 	log.Debugf("Peer=%v, start_height=%v, "+
 		"end_height=%v handling time out", peer.Addr(),
 		req.StartHeight, req.EndHeight)
@@ -2254,7 +2254,7 @@ func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	peer := msg.peer.(*ServerPeer)
 
 	peerQueryMap[peer.Addr()] = msg.BlkManagerQuery
-	req := msg.BlkManagerQuery.Job.Req.(*HeaderQuery)
+	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 	log.Debugf("Added entry to peer query map, peer=%v, "+
 		"start_height=%v, end_height=%v", peer.Addr(),
 		req.StartHeight, req.EndHeight)
@@ -2269,7 +2269,7 @@ func (b *blockManager) handleHdrQueryMsg(queryMap map[string]*query.BlkManagerQu
 		log.Debugf("No Header query for peer=%v", msg.Peer.Addr())
 		return
 	}
-	req := BlkManagerQuery.Job.Req.(*HeaderQuery)
+	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 
 	if !msg.Peer.Connected() {
 		log.Debugf("Peer=%v, start_height=%v, "+
@@ -2346,14 +2346,14 @@ waitForNewEntry:
 			"finalheight=%v, finalhash=%v", b.headerTip, b.headerTipHash)
 		finalTipHeight := b.headerTip
 
-		workMgrResult := &query.TestJobResult{
+		workMgrResult := &query.BlkHdrJobResult{
 			Job:  detailsToResponse.job,
 			Peer: detailsToResponse.response.Peer,
 		}
-		req := workMgrResult.Job.Req.(*HeaderQuery)
+		req := workMgrResult.Job.ReqDetails.(*headerQuery)
 		if initialTipHeight != finalTipHeight {
 			if finalTipHeight != uint32(req.EndHeight) {
-				workMgrResult.Job.TestIndex = detailsToResponse.job.TestIndex + 0.0005
+				workMgrResult.Job.JobIndex = detailsToResponse.job.JobIndex + 0.0005
 				workMgrResult.UnFinished = true
 				req.StartHeight = int32(b.headerTip)
 				req.StartHash = b.headerTipHash
@@ -3129,7 +3129,7 @@ func (b *blockManager) writeHeaderBatch(headerWriteBatch []headerfs.BlockHeader,
 
 }
 
-func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg, headerReq HeaderQuery) ([]headerfs.BlockHeader, *chainhash.Hash, int32) {
+func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg, headerReq headerQuery) ([]headerfs.BlockHeader, *chainhash.Hash, int32) {
 	log.Debugf("******* Inside processHeaderMsg *******")
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.

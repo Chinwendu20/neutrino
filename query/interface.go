@@ -112,23 +112,18 @@ type Request struct {
 	HandleResp func(req, resp wire.Message, peer string) Progress
 }
 
-type TestRequest struct {
-	// Req is the message request to send.
-	Req interface{}
+type BlkHdrRequest struct {
+	// ReqDetails is the struct that holds the arguments needed
+	// for the getheaders request as well as other fields requires to
+	// continuously create new job for the request and handle the header
+	//response
+	ReqDetails interface{}
 
-	// HandleResp is a response handler that will be called for every
-	// message received from the peer that the request was made to. It
-	// should validate the response against the request made, and return a
-	// Progress indicating whether the request was answered by this
-	// particular response.
-	//
-	// NOTE: Since the worker's job queue will be stalled while this method
-	// is running, it should not be doing any expensive operations. It
-	// should validate the response and immediately return the progress.
-	// The response should be handed off to another goroutine for
-	// processing.
-	HandleResp func(peer BlkHdrPeer, blkQuery *BlkManagerQuery)
+	// Sends the getheader message to GetHeaderQuery to be pushed to request
+	// for headers. It also notifies the block manager of the new headerQuery
+	SendToQueryBlkMgr func(peer BlkHdrPeer, blkQuery *BlkManagerQuery)
 
+	// Notifies the blockmanager of a header timeout
 	HandleTimeOut func(peer BlkHdrPeer)
 }
 
@@ -140,7 +135,9 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
-	TestQuery(reqs []*TestRequest, options ...QueryOption)
+
+	// GetHeaderQuery pushes the getheader message to request for headers from a peer
+	GetHeaderQuery(reqs []*BlkHdrRequest, options ...QueryOption)
 }
 
 // Peer is the interface that defines the methods needed by the query package
@@ -166,14 +163,14 @@ type Peer interface {
 }
 
 // BlkHdrPeer is the interface that defines the methods needed by the query package
-// to be able to make getheader requests and receive responses from a network peer
+// to be able to make getheader requests and receive responses from a network peer.
 type BlkHdrPeer interface {
 	Peer
 
-	// QueryGetHeadersMsg sends the getheaders message to the peer
+	// QueryGetHeadersMsg sends the getheaders message to the peer.
 	QueryGetHeadersMsg(req interface{}) error
 
 	// IsPeerBehindStartHeight checks if the peer's height is behind
-	// the chain's highest height
+	// the chain's highest height.
 	IsPeerBehindStartHeight(req interface{}) bool
 }
