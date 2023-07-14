@@ -186,6 +186,8 @@ type blockManager struct { // nolint:maligned
 	// lock below each time they read/write from this field.
 	filterHeaderTipHash chainhash.Hash
 
+	numHeaderCheckpt int
+
 	// newFilterHeadersMtx is the mutex that should be held when
 	// reading/writing the filterHeaderTip variable above.
 	//
@@ -222,6 +224,7 @@ type blockManager struct { // nolint:maligned
 	quit chan struct{}
 
 	headerList     headerlist.Chain
+	HdrListAtIdx   func(idx int32) headerlist.Chain
 	reorgList      headerlist.Chain
 	startHeader    *headerlist.Node
 	nextCheckpoint *chaincfg.Checkpoint
@@ -284,12 +287,14 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		return nil, err
 	}
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.headerList.ResetHeaderState(headerlist.Node{
-		Header: *header,
-		Height: int32(height),
-	})
+
+	// Create function to initialize header list at various headerList map
+	// index
+	bm.HdrListAtMapIdx(make(map[int32]headerlist.Chain))
 	bm.headerTip = height
 	bm.headerTipHash = header.BlockHash()
+
+	bm.HdrListAtIdx = bm.HdrListAtMapIdx(make(map[int32]headerlist.Chain))
 
 	// Finally, we'll set the filter header tip so any goroutines waiting
 	// on the condition obtain the correct initial state.
@@ -2321,11 +2326,12 @@ waitForNewEntry:
 
 		default:
 		}
+
 		b.newResponseCheckptSignal.L.Unlock()
 		b.newResponseCheckptMtx.RLock()
 		detailsToResponse, ok := b.responseCheckptMap[b.headerTipHash]
 		b.newResponseCheckptMtx.RUnlock()
-		log.Debugf("In the middle of header loop")
+
 		if !ok {
 			log.Debugf("Received non tip. Expected: "+
 				"height=%v, hash=%v", b.headerTip, b.headerTipHash)
@@ -3697,4 +3703,17 @@ func (b *blockManager) NotificationsSinceHeight(
 	}
 
 	return blocks, bestHeight, nil
+}
+
+// HdrListAtMapIdx returns a headerList at a given index.
+func (b *blockManager) HdrListAtMapIdx(hdrList map[int32]headerlist.Chain) func(int32) headerlist.Chain {
+	return func(idx int32) headerlist.Chain {
+		_, ok := hdrList[idx]
+		if !ok {
+			hdrList[idx] = headerlist.NewBoundedMemoryChain(
+				numMaxMemHeaders,
+			)
+		}
+		return hdrList[idx]
+	}
 }
