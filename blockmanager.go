@@ -216,9 +216,9 @@ type blockManager struct { // nolint:maligned
 	quit chan struct{}
 
 	headerList   headerlist.Chain
-	HdrListAtIdx func(idx int32) *headerlist.Chain
+	HdrListAtIdx func(idx int32) headerlist.Chain
 	reorgList    headerlist.Chain
-	startHeader  *headerlist.Node
+	TipHeader    wire.BlockHeader
 
 	lastRequested chainhash.Hash
 
@@ -2261,7 +2261,8 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 		Peer: msg.Peer,
 	}
 
-	b.headerList = b.HdrListAtIdx(req.StartHeight)
+	b.headerList = b.HdrListAtIdx(req.InitialHeight)
+	var completeWriteBatch []headerfs.BlockHeader
 	if b.headerList.IsEmpty() {
 
 		hdrAfterCheckPt := msg.Headers.Headers[0]
@@ -2272,6 +2273,11 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 				Height: req.StartHeight + 1,
 				Header: *hdrAfterCheckPt,
 			})
+			msg.Headers.Headers = msg.Headers.Headers[1:]
+			completeWriteBatch = append(completeWriteBatch, headerfs.BlockHeader{
+				BlockHeader: hdrAfterCheckPt,
+				Height:      uint32(req.StartHeight + 1),
+			})
 		} else {
 			workMgrResult.Err = errors.New("invalid headers")
 
@@ -2280,7 +2286,6 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 
 	if !b.headerList.IsEmpty() {
 		writeBatch := b.processHeaderMsg(msg)
-
 		finalHeaderNode := b.headerList.Back()
 		finalHeight := finalHeaderNode.Height
 		finalNodeHash := finalHeaderNode.Header.BlockHash()
@@ -2298,7 +2303,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 					finalNodeHash, msg.Peer.Addr(),
 					req.StopHash)
 
-				b.writeBatchMap[req.InitialHeight] = []headerfs.BlockHeader{}
+				b.writeBatchMap[req.EndHeight] = []headerfs.BlockHeader{}
 				b.headerList = headerlist.NewBoundedMemoryChain(numMaxMemHeaders)
 				workMgrResult.Job.JobIndex = float64(req.InitialHeight)
 				workMgrResult.Err = errors.New("invalid headers")
@@ -2306,9 +2311,9 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 		}
 
 		if writeBatch != nil {
-
+			completeWriteBatch = append(completeWriteBatch, writeBatch...)
 			b.writeBatchMtx.Lock()
-			b.writeBatchMap[req.InitialHeight] = append(b.writeBatchMap[req.InitialHeight], writeBatch...)
+			b.writeBatchMap[req.EndHeight] = append(b.writeBatchMap[req.EndHeight], completeWriteBatch...)
 			b.writeBatchMtx.Unlock()
 			b.writeBatchSignal.Broadcast()
 
@@ -2321,9 +2326,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 			req.StartHeight = finalHeight
 			req.StartHash = finalNodeHash
 
-			curHash := finalHeaderNode.Header.BlockHash()
-
-			req.Locator = []*chainhash.Hash{&curHash}
+			req.Locator = []*chainhash.Hash{&finalNodeHash}
 
 			log.Debugf("Created new job"+
 				"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
@@ -2338,7 +2341,9 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 func (b *blockManager) writeCheckptHeaders() {
 	defer b.wg.Done()
 
-	seekTip := int32(b.headerTip)
+	checkPt := b.findNextHeaderCheckpoint(int32(b.headerTip))
+	seekTip := checkPt.Height
+	startTip := int32(b.headerTip)
 
 	log.Debugf("Start writing  header batch at "+
 		"height=%v", seekTip)
@@ -2368,7 +2373,7 @@ func (b *blockManager) writeCheckptHeaders() {
 			b.writeBatchSignal.L.Lock()
 			continue
 		}
-		if int32(b.headerTip) == seekTip {
+		if seekTip != startTip && int32(b.headerTip) == seekTip {
 			maxTimestamp := b.cfg.TimeSource.AdjustedTime().
 				Add(maxTimeOffset)
 
@@ -2378,7 +2383,7 @@ func (b *blockManager) writeCheckptHeaders() {
 			)
 			hdrList.ResetHeaderState(headerlist.Node{
 				Height: int32(b.headerTip),
-				Header: b.startHeader.Header,
+				Header: b.TipHeader,
 			})
 			err := b.checkHeaderSanity(hdrAfterCheckPt, maxTimestamp, hdrList)
 			if err != nil {
@@ -2397,7 +2402,7 @@ func (b *blockManager) writeCheckptHeaders() {
 		delete(b.writeBatchMap, seekTip)
 		b.writeBatchMtx.Unlock()
 
-		nextCheckpoint := b.findNextHeaderCheckpoint(seekTip)
+		nextCheckpoint := b.findNextHeaderCheckpoint(int32(b.headerTip))
 
 		if nextCheckpoint == nil {
 			return
@@ -2788,6 +2793,7 @@ func (b *blockManager) writeHeaderBatch(headerWriteBatch []headerfs.BlockHeader)
 	b.newHeadersMtx.Lock()
 	b.headerTip = uint32(finalHeight)
 	b.headerTipHash = finalHash
+	b.TipHeader = finalHeaderNode.Header
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
 	return nil
@@ -2814,6 +2820,7 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg) []headerfs.BlockHeader
 
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
+		log.Debugf("Lenght of headers is 0")
 		return nil
 	}
 
@@ -2831,6 +2838,7 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg) []headerfs.BlockHeader
 		if prevNodeEl == nil {
 			log.Warnf("Header list does not contain a previous" +
 				"element as expected -- disconnecting peer")
+
 			hmsg.Peer.Disconnect()
 			b.resetHeaderListToChainTip()
 			return nil
@@ -2869,13 +2877,8 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg) []headerfs.BlockHeader
 				blockHeader.Timestamp, node.Height,
 			)
 
-			// Finally initialize the header ->
-			// map[filterHash]*peer map for filter header
-			// validation purposes later.
-			e := b.headerList.PushBack(node)
-			if b.startHeader == nil {
-				b.startHeader = e
-			}
+			b.headerList.PushBack(node)
+
 		} else {
 			// The block doesn't connect to the last block we know.
 			// We will need to do some additional checks to process
@@ -2890,6 +2893,7 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg) []headerfs.BlockHeader
 			// peer or disconnect the peer that sent us these bad
 			// headers.
 			if hmsg.Peer != b.SyncPeer() && !b.BlockHeadersSynced() {
+				b.resetHeaderListToChainTip()
 				return nil
 			}
 
@@ -3058,6 +3062,8 @@ func (b *blockManager) processHeaderMsg(hmsg *HeadersMsg) []headerfs.BlockHeader
 		}
 
 	}
+	n := b.headerList.Back()
+	log.Debugf("Last header after processing %v", n.Height)
 	return headerWriteBatch
 }
 
