@@ -1,7 +1,6 @@
 package headerlist
 
 import (
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -26,6 +25,8 @@ type Chain interface {
 	// PushBack will push a new entry to the end of the chain. The entry
 	// added to the chain is also returned in place.
 	PushBack(Node) *Node
+
+	IsEmpty() bool
 }
 
 // Node is a node within the Chain. Each node stores a header as well as a
@@ -39,8 +40,6 @@ type Node struct {
 	Header wire.BlockHeader
 
 	prev *Node
-
-	HeaderHash chainhash.Hash
 }
 
 // Prev attempts to access the prior node within the header chain relative to

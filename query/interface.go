@@ -121,7 +121,7 @@ type BlkHdrRequest struct {
 
 	// Sends the getheader message to GetHeaderQuery to be pushed to request
 	// for headers. It also notifies the block manager of the new headerQuery
-	SendToQueryBlkMgr func(peer BlkHdrPeer, blkQuery *BlkManagerQuery)
+	SendQueryToBlkMgr func(peer BlkHdrPeer, blkQuery *BlkManagerQuery)
 
 	// Notifies the blockmanager of a header timeout
 	HandleTimeOut func(peer BlkHdrPeer)

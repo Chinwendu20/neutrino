@@ -70,7 +70,7 @@ type jobResult struct {
 // BlkHdrJobResult is the final result of the worker's handling of the BlkHdrQueryJob.
 type BlkHdrJobResult struct {
 	Job        *BlkHdrQueryJob
-	Peer       Peer
+	Peer       BlkHdrPeer
 	Err        error
 	UnFinished bool
 }
@@ -376,7 +376,7 @@ nextJobLoop:
 				return
 			}
 			blkQuery.Job = job
-			job.SendToQueryBlkMgr(
+			job.SendQueryToBlkMgr(
 				peer, &blkQuery,
 			)
 			goto feedbackLoop

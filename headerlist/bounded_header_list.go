@@ -135,3 +135,8 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 
 	return &b.chain[chainIndex]
 }
+
+func (b *BoundedMemoryChain) IsEmpty() bool {
+
+	return b.len == 0
+}
