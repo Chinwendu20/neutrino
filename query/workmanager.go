@@ -119,9 +119,9 @@ type WorkManager struct {
 	getHdrBatch chan *blkHdrBatch
 	NewWorker   func(Peer) Worker
 
-	quit          chan struct{}
-	wg            sync.WaitGroup
-	HdrJobResults chan *BlkHdrJobResult
+	quit         chan struct{}
+	wg           sync.WaitGroup
+	FeedbackChan chan *BlkHdrJobResult
 }
 
 // Compile time check to ensure WorkManager satisfies the Dispatcher interface.
@@ -130,12 +130,12 @@ var _ Dispatcher = (*WorkManager)(nil)
 // New returns a new WorkManager with the regular worker implementation.
 func New(cfg *Config) *WorkManager {
 	return &WorkManager{
-		cfg:           cfg,
-		newBatches:    make(chan *batch),
-		jobResults:    make(chan *jobResult),
-		quit:          make(chan struct{}),
-		getHdrBatch:   make(chan *blkHdrBatch),
-		HdrJobResults: make(chan *BlkHdrJobResult),
+		cfg:          cfg,
+		newBatches:   make(chan *batch),
+		jobResults:   make(chan *jobResult),
+		quit:         make(chan struct{}),
+		getHdrBatch:  make(chan *blkHdrBatch),
+		FeedbackChan: make(chan *BlkHdrJobResult),
 	}
 }
 
@@ -617,12 +617,51 @@ func (w *WorkManager) testWorkDispatcher() {
 				defer w.wg.Done()
 				defer close(onExit)
 
-				r.Run(w.HdrJobResults, w.quit)
+				r.Run(w.FeedbackChan, w.quit)
 			}()
+		case workerFeedback := <-w.FeedbackChan:
+			log.Debugf("TestWorker -- Feedback for job %v received from peer %v "+
+				"(err=%v)", workerFeedback.Job.Index(),
+				workerFeedback.Peer.Addr(), workerFeedback.Err)
 
-		// A new result came back.
-		case result := <-w.HdrJobResults:
-			log.Debugf("Test -- Result for job %v received from peer %v "+
+			// Delete the job from the worker's active job, such
+			// that the slot gets opened for more work.
+			testRWMutex.RLock()
+			r := testWorkers[workerFeedback.Peer.Addr()]
+			testRWMutex.RUnlock()
+			r.tw.activeJob = false
+
+			batchNum := currentQueries[workerFeedback.Job.Index()]
+			switch {
+			// If the query ended because it was canceled, drop it.
+			case workerFeedback.Err == ErrJobCanceled:
+				log.Tracef("Query(%d) was canceled before "+
+					"result was available from peer %v",
+					workerFeedback.Job.Index(), workerFeedback.Peer.Addr())
+
+				return
+
+			// If the query ended with any other error, put it back
+			// into the work queue.
+			case workerFeedback.Err != nil:
+				// Punish the peer for the failed query.
+				w.cfg.Ranking.Punish(workerFeedback.Peer.Addr())
+
+				log.Debugf("TestWorker -- Query(%d) from peer %v failed, "+
+					"rescheduling: %v", workerFeedback.Job.Index(),
+					workerFeedback.Peer.Addr(), workerFeedback.Err)
+
+				heap.Push(testWork, workerFeedback.Job)
+				currentQueries[workerFeedback.Job.Index()] = batchNum
+
+			// Otherwise we got a successful result and  update the
+			// status of the batch this query is a part of.
+			default:
+
+			}
+
+		case result := <-w.FeedbackChan:
+			log.Debugf("TestWorker -- Result for job %v received from peer %v "+
 				"(err=%v)", result.Job.Index(),
 				result.Peer.Addr(), result.Err)
 

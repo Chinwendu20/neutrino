@@ -225,7 +225,7 @@ type blockManager struct { // nolint:maligned
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
-	writeBatchMap       map[int32][]headerfs.BlockHeader
+	hdrTipToResponse    map[int32]*HeadersMsg
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -255,7 +255,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
-		writeBatchMap:       make(map[int32][]headerfs.BlockHeader),
+		hdrTipToResponse:    make(map[int32][]headerfs.BlockHeader),
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -2256,83 +2256,35 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 	}
 	delete(queryMap, msg.Peer.Addr())
 
+	b.writeBatchMtx.Lock()
+	b.hdrTipToResponse[req.StartHeight] = msg
+	b.writeBatchMtx.Unlock()
+	b.writeBatchSignal.Broadcast()
+
 	workMgrResult := &query.BlkHdrJobResult{
 		Job:  BlkManagerQuery.Job,
 		Peer: msg.Peer,
 	}
+	if msg.Headers.Headers[0].BlockHash() != *req.StopHash {
+		HdrLength := len(msg.Headers.Headers)
+		req.StartHeight = req.StartHeight + int32(HdrLength)
 
-	b.headerList = b.HdrListAtIdx(req.InitialHeight)
-	var completeWriteBatch []headerfs.BlockHeader
-	if b.headerList.IsEmpty() {
-
-		hdrAfterCheckPt := msg.Headers.Headers[0]
-		if hdrAfterCheckPt.PrevBlock == req.StartHash {
-
-			b.headerList.ResetHeaderState(headerlist.Node{
-
-				Height: req.StartHeight + 1,
-				Header: *hdrAfterCheckPt,
-			})
-			msg.Headers.Headers = msg.Headers.Headers[1:]
-			completeWriteBatch = append(completeWriteBatch, headerfs.BlockHeader{
-				BlockHeader: hdrAfterCheckPt,
-				Height:      uint32(req.StartHeight + 1),
-			})
-		} else {
-			workMgrResult.Err = errors.New("invalid headers")
-
+		_, ok = b.hdrTipToResponse[req.StartHeight]
+		if ok {
+			return
 		}
+
+		workMgrResult.Job.JobIndex = workMgrResult.Job.JobIndex + 0.000005
+		workMgrResult.UnFinished = true
+		req.StartHeight = req.StartHeight + int32(HdrLength)
+		req.StartHash = msg.Headers.Headers[HdrLength-1].BlockHash()
+		req.Locator = []*chainhash.Hash{&req.StartHash}
+
+		log.Debugf("Created new job"+
+			"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
+
 	}
 
-	if !b.headerList.IsEmpty() {
-		writeBatch := b.processHeaderMsg(msg)
-		finalHeaderNode := b.headerList.Back()
-		finalHeight := finalHeaderNode.Height
-		finalNodeHash := finalHeaderNode.Header.BlockHash()
-		// Verify the header at the next checkpoint height matches.
-		if finalHeight == req.EndHeight {
-			if finalNodeHash.IsEqual(req.StopHash) {
-				log.Infof("Verified downloaded block "+
-					"header against checkpoint at height "+
-					"%d/hash %s", finalHeaderNode.Height, finalNodeHash)
-			} else {
-				log.Warnf("Block header at height %d/hash "+
-					"%s from peer %s does NOT match "+
-					"expected checkpoint hash of %s -- "+
-					"disconnecting", finalHeight,
-					finalNodeHash, msg.Peer.Addr(),
-					req.StopHash)
-
-				b.writeBatchMap[req.EndHeight] = []headerfs.BlockHeader{}
-				b.headerList = headerlist.NewBoundedMemoryChain(numMaxMemHeaders)
-				workMgrResult.Job.JobIndex = float64(req.InitialHeight)
-				workMgrResult.Err = errors.New("invalid headers")
-			}
-		}
-
-		if writeBatch != nil {
-			completeWriteBatch = append(completeWriteBatch, writeBatch...)
-			b.writeBatchMtx.Lock()
-			b.writeBatchMap[req.EndHeight] = append(b.writeBatchMap[req.EndHeight], completeWriteBatch...)
-			b.writeBatchMtx.Unlock()
-			b.writeBatchSignal.Broadcast()
-
-		}
-
-		if finalHeight != req.EndHeight {
-
-			workMgrResult.Job.JobIndex = workMgrResult.Job.JobIndex + 0.0005
-			workMgrResult.UnFinished = true
-			req.StartHeight = finalHeight
-			req.StartHash = finalNodeHash
-
-			req.Locator = []*chainhash.Hash{&finalNodeHash}
-
-			log.Debugf("Created new job"+
-				"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
-
-		}
-	}
 	query.SendResultToWorkMgr(BlkManagerQuery.Results,
 		workMgrResult, b.quit)
 
@@ -2341,12 +2293,8 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 func (b *blockManager) writeCheckptHeaders() {
 	defer b.wg.Done()
 
-	checkPt := b.findNextHeaderCheckpoint(int32(b.headerTip))
-	seekTip := checkPt.Height
-	startTip := int32(b.headerTip)
-
-	log.Debugf("Start writing  header batch at "+
-		"height=%v", seekTip)
+	log.Debugf("writeCheckptHeaders started at initial height"+
+		"height=%v", b.headerTip)
 	b.writeBatchSignal.L.Lock()
 	for {
 		log.Debugf("Waiting for header batch broadcast")
@@ -2364,51 +2312,31 @@ func (b *blockManager) writeCheckptHeaders() {
 
 		b.writeBatchSignal.L.Unlock()
 		b.writeBatchMtx.RLock()
-		writeBatch, ok := b.writeBatchMap[seekTip]
+		hmsg, ok := b.hdrTipToResponse[int32(b.headerTip)]
 		b.writeBatchMtx.RUnlock()
 
 		if !ok {
 			log.Debugf("Received non tip. Expected: "+
-				"height=%v", seekTip)
+				"height=%v", b.headerTip)
 			b.writeBatchSignal.L.Lock()
 			continue
 		}
-		if seekTip != startTip && int32(b.headerTip) == seekTip {
-			maxTimestamp := b.cfg.TimeSource.AdjustedTime().
-				Add(maxTimeOffset)
 
-			hdrAfterCheckPt := writeBatch[0].BlockHeader
-			hdrList := headerlist.NewBoundedMemoryChain(
-				2,
-			)
-			hdrList.ResetHeaderState(headerlist.Node{
-				Height: int32(b.headerTip),
-				Header: b.TipHeader,
-			})
-			err := b.checkHeaderSanity(hdrAfterCheckPt, maxTimestamp, hdrList)
-			if err != nil {
-				//	TODO(Maureen): What should be done here?
-			}
-
-		}
-		err := b.writeHeaderBatch(writeBatch)
-		if err != nil {
-			panic(err)
-		}
 		log.Debugf("Gotten tip"+
-			"height=%v", seekTip)
+			"height=%v", b.headerTip)
 
 		b.writeBatchMtx.Lock()
-		delete(b.writeBatchMap, seekTip)
+		delete(b.hdrTipToResponse, int32(b.headerTip))
 		b.writeBatchMtx.Unlock()
+		initialHdrTip := b.headerTip
+		b.handleHeadersMsg(hmsg)
 
-		nextCheckpoint := b.findNextHeaderCheckpoint(int32(b.headerTip))
+		if b.headerTip > initialHdrTip {
+			//	send to workmanager
 
-		if nextCheckpoint == nil {
-			return
 		}
+		//Resend to wormanager for scheduling
 
-		seekTip = nextCheckpoint.Height
 		b.writeBatchSignal.L.Lock()
 	}
 
