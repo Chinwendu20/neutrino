@@ -135,7 +135,7 @@ func New(cfg *Config) *WorkManager {
 		jobResults:    make(chan *jobResult),
 		quit:          make(chan struct{}),
 		getHdrBatch:   make(chan *blkHdrBatch),
-		HdrJobResults: make(chan *BlkHdrJobResult),
+		HdrJobResults: make(chan *BlkHdrJobResult, 2),
 	}
 }
 
@@ -622,7 +622,7 @@ func (w *WorkManager) testWorkDispatcher() {
 
 		// A new result came back.
 		case result := <-w.HdrJobResults:
-			log.Debugf("Test -- Result for job %v received from peer %v "+
+			log.Debugf("Testworker received Result for job %v, from peer %v "+
 				"(err=%v)", result.Job.Index(),
 				result.Peer.Addr(), result.Err)
 

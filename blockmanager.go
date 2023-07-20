@@ -2252,6 +2252,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 	}
 
 	select {
+	case <-BlkManagerQuery.RespChan:
 	case BlkManagerQuery.RespChan <- struct{}{}:
 		log.Debugf("Peer=%v, start_height=%v, "+
 			"end_height=%v sent message to worker", msg.Peer.Addr(),
@@ -2288,9 +2289,10 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 		req.StartHash = msg.Headers.Headers[HdrLength-1].BlockHash()
 		req.Locator = []*chainhash.Hash{&req.StartHash}
 
-		log.Debugf("Created new job"+
+		log.Debugf("Created new job from handleCheckpt fxn"+
 			"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
 
+		log.Debugf("Sending result from handleCheckpt fxn")
 		query.SendResultToWorkMgr(BlkManagerQuery.Results,
 			workMgrResult, b.quit)
 
@@ -2354,10 +2356,11 @@ func (b *blockManager) writeCheckptHeaders() {
 			req.StartHash = b.headerTipHash
 			req.Locator = []*chainhash.Hash{&req.StartHash}
 
-			log.Debugf("Created new job"+
+			log.Debugf("Created new job from writecheckpt loop"+
 				"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
 
 		}
+		log.Debugf("Sending result from writecheckpt loop")
 		query.SendResultToWorkMgr(respDetails.Query.Results,
 			workMgrResult, b.quit)
 		//Resend to wormanager for scheduling

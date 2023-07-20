@@ -188,7 +188,7 @@ func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 		server:           s,
 		persistent:       isPersistent,
 		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
-		quit:             make(chan struct{}),
+		quit:             make(chan struct{}, 2),
 		recvSubscribers:  make(map[spMsgSubscription]struct{}),
 		recvSubscribers2: make(map[msgSubscription]struct{}),
 	}

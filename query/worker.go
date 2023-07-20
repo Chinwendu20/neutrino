@@ -406,6 +406,7 @@ feedbackLoop:
 				job.Index())
 
 			jobErr = ErrPeerDisconnected
+			blkQuery.RespChan <- struct{}{}
 
 		// If the job was canceled, we report this back to the
 		// work manager.
@@ -416,11 +417,13 @@ feedbackLoop:
 			jobErr = ErrJobCanceled
 
 		case <-quit:
+			blkQuery.RespChan <- struct{}{}
 			return
 		}
 		// Stop to allow garbage collection.
 
 		//Send error result from worker to workManager.
+		log.Debugf("SendResultToWorkMgr from worker loop")
 		SendResultToWorkMgr(results, &BlkHdrJobResult{
 			Job:  job,
 			Peer: peer,
@@ -445,10 +448,9 @@ func SendResultToWorkMgr(results chan<- *BlkHdrJobResult,
 
 	// We have a result ready for the query, hand it off before
 	// getting a new job.
-
 	select {
 	case results <- jobResult:
-		log.Debugf("Test -- Sent result to workmanager")
+		log.Debugf("SendResultToWorkMgr received result for peer=%v, index=%V", jobResult.Peer.Addr(), jobResult.Job.Index())
 	case <-quit:
 		return
 	}
