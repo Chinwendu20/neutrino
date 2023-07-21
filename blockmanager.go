@@ -121,7 +121,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
+			quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -984,7 +984,7 @@ type extendedHeaderMsg struct {
 // handle a query for checkpointed block headers.
 type CheckpointedBlockHeadersQuery struct {
 	blockMgr   *blockManager
-	msgs       []*headerQuery
+	msgs       []headerQuery
 	headerChan chan extendedHeaderMsg
 }
 
@@ -1025,7 +1025,7 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(peer query.BlkHdrPeer,
 
 func (b *blockManager) batchCheckpointedBlkHeaders() {
 
-	var queryMsgs []*headerQuery
+	var queryMsgs []headerQuery
 	curHeight := b.headerTip
 	curHash := b.headerTipHash
 	nextCheckpoint := b.findNextHeaderCheckpoint(int32(curHeight))
@@ -1041,7 +1041,7 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 		endHeight := nextCheckptHeight
 		tmpCurHash := curHash
 
-		queryMsg := &headerQuery{
+		queryMsg := headerQuery{
 			Locator:       blockchain.BlockLocator([]*chainhash.Hash{&tmpCurHash}),
 			StopHash:      endHash,
 			StartHeight:   int32(curHeight),
@@ -2239,7 +2239,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		log.Debugf("No Header query for peer=%v", msg.Peer.Addr())
 		return
 	}
-	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
+	req := BlkManagerQuery.Job.ReqDetails.(headerQuery)
 	log.Debugf("Received header for peer %v, start_height=%v, end_height=%v",
 		msg.Peer.Addr(), req.StartHeight, req.EndHeight)
 
@@ -2263,17 +2263,15 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 	delete(queryMap, msg.Peer.Addr())
 
 	b.writeBatchMtx.Lock()
-	blkQuery := BlkManagerQuery
 	b.hdrTipToResponse[req.StartHeight] = &respAndQuery{
 		response: msg,
-		Query:    blkQuery,
+		Query:    BlkManagerQuery,
 	}
 	b.writeBatchMtx.Unlock()
 	b.writeBatchSignal.Broadcast()
 
-	job := BlkManagerQuery.Job
 	workMgrResult := &query.BlkHdrJobResult{
-		Job:  job,
+		Job:  BlkManagerQuery.Job,
 		Peer: msg.Peer,
 	}
 	HdrLength := len(msg.Headers.Headers)
