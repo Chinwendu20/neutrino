@@ -622,16 +622,9 @@ func (w *WorkManager) testWorkDispatcher() {
 
 		// A new result came back.
 		case result := <-w.HdrJobResults:
-			log.Debugf("Testworker received Result for job %v, from peer %v "+
+			log.Debugf("TestworkManager received Result for job %v, from peer %v "+
 				"(err=%v)", result.Job.Index(),
 				result.Peer.Addr(), result.Err)
-
-			// Delete the job from the worker's active job, such
-			// that the slot gets opened for more work.
-			testRWMutex.RLock()
-			r := testWorkers[result.Peer.Addr()]
-			testRWMutex.RUnlock()
-			r.tw.activeJob = false
 
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have
@@ -673,17 +666,20 @@ func (w *WorkManager) testWorkDispatcher() {
 					log.Debugf("Length of testWork before push %v", testWork.Len())
 					testWorkRWMtx.Lock()
 					heap.Push(testWork, &result.Job)
+					batch.rem++
 					testWorkRWMtx.Unlock()
 					log.Debugf("Length of testWork after push %v", testWork.Len())
 					temp := testWork.Peek().(*BlkHdrQueryJob)
 					log.Debugf("First element in the heap: %v", temp.Index())
 					currentQueries[result.Job.Index()] = batchNum
+
+					continue
 				} else {
 					log.Debugf("Job %v is Finished", result.Job.Index())
 				}
 				// Decrement the number of queries remaining in
 				// the batch.
-				if batch != nil && !result.UnFinished {
+				if batch != nil {
 					batch.rem--
 					log.Debugf("Remaining jobs for batch "+
 						"%v: %v ", batchNum, batch.rem)

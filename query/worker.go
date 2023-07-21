@@ -392,7 +392,7 @@ feedbackLoop:
 		// A header has been received for the query.
 		case <-blkQuery.RespChan:
 			log.Debugf("Worker gotten respchan, peer=%v for job index %v", peer.Addr(), job.Index())
-			w.activeJob = true
+			w.activeJob = false
 
 			// We did get a header, so we go back to fetching for
 			// more work
