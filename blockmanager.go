@@ -79,7 +79,7 @@ type donePeerMsg struct {
 
 type checkPtQuery struct {
 	peer            query.BlkHdrPeer
-	BlkManagerQuery *query.BlkManagerQuery
+	BlkManagerQuery query.BlkManagerQuery
 }
 
 type timedOutMsg struct {
@@ -121,7 +121,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
+		quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -1013,7 +1013,7 @@ func (c *CheckpointedBlockHeadersQuery) handleTimeOut(peer query.BlkHdrPeer) {
 // handleResponse is the internal response handler used for requests for this
 // block Headers query.
 func (c *CheckpointedBlockHeadersQuery) handleResponse(peer query.BlkHdrPeer,
-	blkQuery *query.BlkManagerQuery) {
+	blkQuery query.BlkManagerQuery) {
 	select {
 	case c.blockMgr.peerChan <- &checkPtQuery{peer: peer,
 		BlkManagerQuery: blkQuery,
@@ -2141,7 +2141,7 @@ func (b *blockManager) blockHandler() {
 	// Obtaining chainTip here even though it might not be needed if
 	// the network has no checkpoints to prevent the error that arises
 	// from goto jumping a variable declaration.
-	peerQueryMap := make(map[string]*query.BlkManagerQuery)
+	peerQueryMap := make(map[string]query.BlkManagerQuery)
 	candidatePeers := list.New()
 	checkpoints := b.cfg.ChainParams.Checkpoints
 	if len(checkpoints) == 0 {
@@ -2202,7 +2202,7 @@ unCheckPtLoop:
 }
 
 func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
-	peerQueryMap map[string]*query.BlkManagerQuery) {
+	peerQueryMap map[string]query.BlkManagerQuery) {
 	peer := msg.peer.(*ServerPeer)
 	BlkManagerQuery, _ := peerQueryMap[peer.Addr()]
 	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
@@ -2214,7 +2214,7 @@ func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
 }
 
 func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
-	peerQueryMap map[string]*query.BlkManagerQuery) {
+	peerQueryMap map[string]query.BlkManagerQuery) {
 	peer := msg.peer.(*ServerPeer)
 
 	peerQueryMap[peer.Addr()] = msg.BlkManagerQuery
@@ -2227,10 +2227,10 @@ func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 
 type respAndQuery struct {
 	response *HeadersMsg
-	Query    *query.BlkManagerQuery
+	Query    query.BlkManagerQuery
 }
 
-func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManagerQuery,
+func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManagerQuery,
 	msg *HeadersMsg) {
 
 	BlkManagerQuery, ok := queryMap[msg.Peer.Addr()]
@@ -2263,15 +2263,17 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]*query.BlkManage
 	delete(queryMap, msg.Peer.Addr())
 
 	b.writeBatchMtx.Lock()
+	blkQuery := BlkManagerQuery
 	b.hdrTipToResponse[req.StartHeight] = &respAndQuery{
 		response: msg,
-		Query:    BlkManagerQuery,
+		Query:    blkQuery,
 	}
 	b.writeBatchMtx.Unlock()
 	b.writeBatchSignal.Broadcast()
 
+	job := BlkManagerQuery.Job
 	workMgrResult := &query.BlkHdrJobResult{
-		Job:  BlkManagerQuery.Job,
+		Job:  job,
 		Peer: msg.Peer,
 	}
 	HdrLength := len(msg.Headers.Headers)
@@ -2307,9 +2309,9 @@ func (b *blockManager) writeCheckptHeaders() {
 		"height=%v", b.headerTip)
 	b.writeBatchSignal.L.Lock()
 	for {
-		log.Debugf("Waiting for header batch broadcast")
+		log.Debugf("Waiting for header batch broadcast for tip %v", b.headerTip)
 		b.writeBatchSignal.Wait()
-		log.Debugf("Gotten seekTip broadcast")
+		log.Debugf("Gotten seekTip broadcast for tip %v", b.headerTip)
 		// While we're awake, we'll quickly check to see if we need to
 		// quit early.
 		select {
@@ -2331,19 +2333,21 @@ func (b *blockManager) writeCheckptHeaders() {
 			b.writeBatchSignal.L.Lock()
 			continue
 		}
-
+		req := respDetails.Query.Job.ReqDetails.(*headerQuery)
 		log.Debugf("Gotten tip"+
-			"height=%v", b.headerTip)
+			"Expected_height=%v, Start_height=%v, peer+%v", b.headerTip, req.StartHeight, respDetails.response.Peer.Addr())
 
 		b.writeBatchMtx.Lock()
 		delete(b.hdrTipToResponse, int32(b.headerTip))
 		b.writeBatchMtx.Unlock()
 		initialHdrTip := b.headerTip
+
+		b.syncPeerMutex.Lock()
 		b.syncPeer = respDetails.response.Peer
+		b.syncPeerMutex.Unlock()
+
 		b.handleHeadersMsg(respDetails.response)
 		b.resetHeaderListToChainTip()
-
-		req := respDetails.Query.Job.ReqDetails.(*headerQuery)
 
 		workMgrResult := &query.BlkHdrJobResult{
 			Job:  respDetails.Query.Job,

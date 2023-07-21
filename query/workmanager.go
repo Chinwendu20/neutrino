@@ -660,7 +660,7 @@ func (w *WorkManager) testWorkDispatcher() {
 					"rescheduling: %v", result.Job.Index(),
 					result.Peer.Addr(), result.Err)
 
-				heap.Push(testWork, result.Job)
+				heap.Push(testWork, &result.Job)
 				currentQueries[result.Job.Index()] = batchNum
 
 			// Otherwise we got a successful result and  update the
@@ -672,7 +672,7 @@ func (w *WorkManager) testWorkDispatcher() {
 					log.Debugf("Job %v is unfinished", result.Job.Index())
 					log.Debugf("Length of testWork before push %v", testWork.Len())
 					testWorkRWMtx.Lock()
-					heap.Push(testWork, result.Job)
+					heap.Push(testWork, &result.Job)
 					testWorkRWMtx.Unlock()
 					log.Debugf("Length of testWork after push %v", testWork.Len())
 					temp := testWork.Peek().(*BlkHdrQueryJob)
@@ -714,7 +714,7 @@ func (w *WorkManager) testWorkDispatcher() {
 					Timeout:       minQueryTimeout,
 					encoding:      batch.options.encoding,
 					cancelChan:    batch.options.cancelChan,
-					BlkHdrRequest: q,
+					BlkHdrRequest: *q,
 				})
 				currentQueries[queryIndex] = batchIndex
 				queryIndex++

@@ -38,7 +38,7 @@ type BlkHdrQueryJob struct {
 	Timeout    time.Duration
 	encoding   wire.MessageEncoding
 	cancelChan <-chan struct{}
-	*BlkHdrRequest
+	BlkHdrRequest
 }
 
 // BlkHdrQueryJob should satisfy the Task interface in order to be sorted by the
@@ -69,7 +69,7 @@ type jobResult struct {
 
 // BlkHdrJobResult is the final result of the worker's handling of the BlkHdrQueryJob.
 type BlkHdrJobResult struct {
-	Job        *BlkHdrQueryJob
+	Job        BlkHdrQueryJob
 	Peer       BlkHdrPeer
 	Err        error
 	UnFinished bool
@@ -306,7 +306,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 // the worker and workmanager
 type BlkManagerQuery struct {
 	RespChan chan struct{}
-	Job      *BlkHdrQueryJob
+	Job      BlkHdrQueryJob
 	Results  chan<- *BlkHdrJobResult
 }
 
@@ -375,9 +375,9 @@ nextJobLoop:
 					peer.Addr(), err)
 				return
 			}
-			blkQuery.Job = job
+			blkQuery.Job = *job
 			job.SendQueryToBlkMgr(
-				peer, &blkQuery,
+				peer, blkQuery,
 			)
 			goto feedbackLoop
 		}
@@ -391,7 +391,7 @@ feedbackLoop:
 		select {
 		// A header has been received for the query.
 		case <-blkQuery.RespChan:
-			log.Debugf("Header received peer=%v for job index %v", peer.Addr(), job.Index())
+			log.Debugf("Worker gotten respchan, peer=%v for job index %v", peer.Addr(), job.Index())
 			w.activeJob = true
 
 			// We did get a header, so we go back to fetching for
@@ -425,7 +425,7 @@ feedbackLoop:
 		//Send error result from worker to workManager.
 		log.Debugf("SendResultToWorkMgr from worker loop")
 		SendResultToWorkMgr(results, &BlkHdrJobResult{
-			Job:  job,
+			Job:  *job,
 			Peer: peer,
 			Err:  jobErr,
 		}, quit)
