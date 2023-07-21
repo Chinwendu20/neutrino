@@ -994,7 +994,7 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.BlkHdrRequest {
 	reqs := make([]*query.BlkHdrRequest, len(c.msgs))
 	for idx, m := range c.msgs {
 		reqs[idx] = &query.BlkHdrRequest{
-			ReqDetails:        m,
+			ReqDetails:        &m,
 			SendQueryToBlkMgr: c.handleResponse,
 			HandleTimeOut:     c.handleTimeOut,
 		}
@@ -2239,7 +2239,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		log.Debugf("No Header query for peer=%v", msg.Peer.Addr())
 		return
 	}
-	req := BlkManagerQuery.Job.ReqDetails.(headerQuery)
+	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 	log.Debugf("Received header for peer %v, start_height=%v, end_height=%v",
 		msg.Peer.Addr(), req.StartHeight, req.EndHeight)
 
@@ -2276,7 +2276,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 	}
 	HdrLength := len(msg.Headers.Headers)
 	if msg.Headers.Headers[HdrLength-1].BlockHash() != *req.StopHash {
-
+		req := workMgrResult.Job.ReqDetails.(*headerQuery)
 		req.StartHeight = req.StartHeight + int32(HdrLength)
 
 		_, ok = b.hdrTipToResponse[req.StartHeight]
@@ -2290,7 +2290,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		req.Locator = []*chainhash.Hash{&req.StartHash}
 
 		log.Debugf("Created new job from handleCheckpt fxn"+
-			"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
+			"start_height=%v, end_height=%v", workMgrResult.Job.ReqDetails.(*headerQuery).StartHeight, workMgrResult.Job.ReqDetails.(*headerQuery).EndHeight)
 
 		log.Debugf("Sending result from handleCheckpt fxn")
 		query.SendResultToWorkMgr(BlkManagerQuery.Results,
