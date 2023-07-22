@@ -171,6 +171,10 @@ type BlkHdrPeer interface {
 	QueryGetHeadersMsg(req interface{}) error
 
 	// IsPeerBehindStartHeight checks if the peer's height is behind
-	// the chain's highest height.
+	// the query's start height.
 	IsPeerBehindStartHeight(req interface{}) bool
+
+	LastReqDuration() int64
+
+	UpdateRequestDuration()
 }

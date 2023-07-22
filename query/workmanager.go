@@ -71,6 +71,12 @@ type PeerRanking interface {
 	Order(peers []string)
 }
 
+type ExpPeerRanking interface {
+
+	// Order sorst the slice of peers according to their ranking.
+	Order(peers []BlkHdrPeer)
+}
+
 // activeWorker wraps a Worker that is currently running, together with the job
 // we have given to it.
 // TODO(halseth): support more than one active job at a time.
@@ -100,6 +106,8 @@ type Config struct {
 	Ranking PeerRanking
 
 	NewBlkHdrWorker func(BlkHdrPeer) *blkHdrWorker
+
+	ERanking ExpPeerRanking
 }
 
 // WorkManager is the main access point for outside callers, and satisfies the
@@ -667,9 +675,9 @@ func (w *WorkManager) testWorkDispatcher() {
 					testWorkRWMtx.Lock()
 					heap.Push(testWork, &result.Job)
 					batch.rem++
-					testWorkRWMtx.Unlock()
 					log.Debugf("Length of testWork after push %v", testWork.Len())
 					temp := testWork.Peek().(*BlkHdrQueryJob)
+					testWorkRWMtx.Unlock()
 					log.Debugf("First element in the heap: %v", temp.Index())
 					currentQueries[result.Job.Index()] = batchNum
 

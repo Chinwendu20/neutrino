@@ -179,18 +179,22 @@ type ServerPeer struct {
 	recvSubscribers  map[spMsgSubscription]struct{}
 	recvSubscribers2 map[msgSubscription]struct{}
 	mtxSubscribers   sync.RWMutex
+
+	recentReqStartTime time.Time
+	recentReqDuration  int64
 }
 
 // NewServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:           s,
-		persistent:       isPersistent,
-		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
-		quit:             make(chan struct{}, 2),
-		recvSubscribers:  make(map[spMsgSubscription]struct{}),
-		recvSubscribers2: make(map[msgSubscription]struct{}),
+		server:            s,
+		persistent:        isPersistent,
+		knownAddresses:    lru.NewCache[string, *cachedAddr](5000),
+		quit:              make(chan struct{}, 2),
+		recvSubscribers:   make(map[spMsgSubscription]struct{}),
+		recvSubscribers2:  make(map[msgSubscription]struct{}),
+		recentReqDuration: time.Duration(0).Nanoseconds(),
 	}
 }
 
@@ -203,6 +207,10 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 	}
 	bestHash := bestHeader.BlockHash()
 	return &bestHash, int32(bestHeight), nil
+}
+
+func (sp *ServerPeer) LastReqDuration() int64 {
+	return sp.recentReqDuration
 }
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
@@ -533,7 +541,8 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 }
 
 func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
-
+	start := time.Now()
+	sp.recentReqStartTime = start
 	queryGetHeaders, ok := req.(*headerQuery)
 
 	if !ok {
@@ -547,6 +556,12 @@ func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
 	}
 
 	return nil
+}
+
+func (sp *ServerPeer) UpdateRequestDuration() {
+
+	duration := time.Since(sp.recentReqStartTime)
+	sp.recentReqDuration = duration.Nanoseconds()
 }
 
 func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {
@@ -780,6 +795,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		NewWorker:       query.NewWorker,
 		Ranking:         query.NewPeerRanking(),
 		NewBlkHdrWorker: query.NewBlkHdrWorker,
+		ERanking:        query.NewExpPeerRanking(),
 	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,

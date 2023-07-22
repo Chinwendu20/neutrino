@@ -206,10 +206,6 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// response handler to check whether it was answering
 			// our request.
 			case resp := <-msgChan:
-				timeout.Stop()
-				timeout = time.NewTimer(
-					2 * job.timeout,
-				)
 				progress := job.HandleResp(
 					job.Req, resp, peer.Addr(),
 				)
@@ -387,6 +383,7 @@ nextJobLoop:
 feedbackLoop:
 	// Wait for the correct response to be received from the peer,
 	// or an error happening.
+	timeout := time.NewTimer(job.Timeout)
 	for {
 		select {
 		// A header has been received for the query.
@@ -397,13 +394,24 @@ feedbackLoop:
 			// We did get a header, so we go back to fetching for
 			// more work
 			goto nextJobLoop
-
+		case <-timeout.C:
+			// The query did experience a timeout and will
+			// be given to someone else.
+			jobErr = ErrQueryTimeout
+			log.Tracef("Worker %v timeout for request %T "+
+				"with job index %v", peer.Addr(),
+				job.BlkHdrRequest, job.Index())
 		// If the peer disconnects before giving us a valid
 		// answer, we'll also exit with an error.
 		case <-peer.OnDisconnect():
 			log.Debugf("Peer %v for worker disconnected, "+
 				"cancelling job %v", peer.Addr(),
 				job.Index())
+			if jobErr == ErrQueryTimeout {
+
+				peer.UpdateRequestDuration()
+				goto nextJobLoop
+			}
 
 			jobErr = ErrPeerDisconnected
 			blkQuery.RespChan <- struct{}{}
@@ -433,6 +441,10 @@ feedbackLoop:
 		// If the peer disconnected, we can exit immediately.
 		if jobErr == ErrPeerDisconnected {
 			return
+		}
+
+		if jobErr == ErrJobCanceled {
+			goto feedbackLoop
 		}
 		// If it is not a peer disconnect continue polling for work
 		goto nextJobLoop

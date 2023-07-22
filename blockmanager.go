@@ -2232,7 +2232,7 @@ type respAndQuery struct {
 
 func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManagerQuery,
 	msg *HeadersMsg) {
-
+	msg.Peer.UpdateRequestDuration()
 	BlkManagerQuery, ok := queryMap[msg.Peer.Addr()]
 
 	if !ok {
@@ -2345,9 +2345,6 @@ func (b *blockManager) writeCheckptHeaders() {
 			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.StartHeight, respDetails.response.Peer.Addr(),
 			respDetails.Query.Job.Index())
 
-		b.writeBatchMtx.Lock()
-		delete(b.hdrTipToResponse, int32(b.headerTip))
-		b.writeBatchMtx.Unlock()
 		initialHdrTip := b.headerTip
 
 		b.syncPeerMutex.Lock()
@@ -2364,9 +2361,14 @@ func (b *blockManager) writeCheckptHeaders() {
 		if b.headerTip <= initialHdrTip {
 
 			workMgrResult.Err = errors.New("invalid headers")
-			req.StartHeight = int32(b.headerTip)
-			req.StartHash = b.headerTipHash
-			req.Locator = []*chainhash.Hash{&req.StartHash}
+			workMgrResult.Job.ReqDetails = &headerQuery{
+				Locator:       []*chainhash.Hash{&b.headerTipHash},
+				StopHash:      req.StopHash,
+				StartHeight:   int32(b.headerTip),
+				EndHeight:     req.EndHeight,
+				StartHash:     b.headerTipHash,
+				InitialHeight: req.StartHeight,
+			}
 
 			log.Debugf("Created new job from writecheckpt loop"+
 				"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)

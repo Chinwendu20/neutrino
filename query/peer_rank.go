@@ -27,14 +27,27 @@ type peerRanking struct {
 	mutex sync.RWMutex
 }
 
+type expPeerRanking struct {
+	rank  map[string]int64
+	mutex sync.RWMutex
+}
+
 // A compile time check to ensure peerRanking satisfies the PeerRanking
 // interface.
 var _ PeerRanking = (*peerRanking)(nil)
+
+var _ ExpPeerRanking = (*expPeerRanking)(nil)
 
 // NewPeerRanking returns a new, empty ranking.
 func NewPeerRanking() PeerRanking {
 	return &peerRanking{
 		rank: make(map[string]uint64),
+	}
+}
+
+func NewExpPeerRanking() ExpPeerRanking {
+	return &expPeerRanking{
+		rank: make(map[string]int64),
 	}
 }
 
@@ -56,6 +69,29 @@ func (p *peerRanking) Order(peers []string) {
 		}
 		return score1 < score2
 	})
+}
+
+func (p *expPeerRanking) Order(peers []BlkHdrPeer) {
+	sort.Slice(peers, func(i, j int) bool {
+
+		return peers[i].LastReqDuration() < peers[j].LastReqDuration()
+	})
+}
+
+// AddPeer adds a new peer to the ranking, starting out with the default score.
+func (p *expPeerRanking) AddPeer(peer string) {
+
+	p.mutex.RLock()
+	if _, ok := p.rank[peer]; ok {
+
+		p.mutex.RUnlock()
+		return
+	}
+
+	p.mutex.RUnlock()
+	p.mutex.Lock()
+	p.rank[peer] = 0
+	p.mutex.Unlock()
 }
 
 // AddPeer adds a new peer to the ranking, starting out with the default score.
