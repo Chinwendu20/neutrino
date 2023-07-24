@@ -563,7 +563,7 @@ func (sp *ServerPeer) UpdateRequestDuration() {
 
 	duration := time.Since(sp.recentReqStartTime)
 	sp.recentReqDuration = duration
-	log.Debugf("Peer=%v, updated duration to=%v", sp.Addr(), duration.Nanoseconds())
+	log.Debugf("Peer=%v, updated duration to=%v", sp.Addr(), duration.Seconds())
 }
 
 func (sp *ServerPeer) PeerTimeout() time.Duration {

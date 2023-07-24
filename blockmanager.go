@@ -121,7 +121,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
+		quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -2218,13 +2218,35 @@ func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	peer := msg.peer.(*ServerPeer)
 	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 	b.writeBatchMtx.RLock()
+	log.Debugf("Checkiing if resp to query exists (handleCheckPtQuery), peer=%v, "+
+		"start_height=%v, end_height=%v, index=%v", peer.Addr(),
+		req.StartHeight, req.EndHeight, msg.BlkManagerQuery.Job.Index())
 	_, ok := b.hdrTipToResponse[req.StartHeight]
 	if ok {
 		log.Debugf("Response already received (handlecheckptquery), peer=%v, "+
 			"start_height=%v, end_height=%v, index=%v", peer.Addr(),
 			req.StartHeight, req.EndHeight, msg.BlkManagerQuery.Job.Index())
+		b.writeBatchMtx.RUnlock()
+
+		select {
+		case msg.BlkManagerQuery.RespChan <- struct{}{}:
+			log.Debugf("Peer=%v, start_height=%v, "+
+				"end_height=%v sent message to worker (handlecheckptquery)", peer.Addr(),
+				req.StartHeight, req.EndHeight)
+
+		case <-peer.OnDisconnect():
+			log.Debugf("In (handlecheckptquery),Peer=%v, start_height=%v, "+
+				"end_height=%v for Header Message is disconnected", peer.Addr(),
+				req.StartHeight, req.EndHeight)
+		case <-b.quit:
+			return
+		}
+
 		return
 	}
+	log.Debugf("Unlocked resp to query exists (handleCheckPtQuery), peer=%v, "+
+		"start_height=%v, end_height=%v, index=%v", peer.Addr(),
+		req.StartHeight, req.EndHeight, msg.BlkManagerQuery.Job.Index())
 	b.writeBatchMtx.RUnlock()
 
 	peer.recentReqStartTime = time.Now()
@@ -2285,28 +2307,37 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 	delete(queryMap, msg.Peer.Addr())
 
 	b.writeBatchMtx.RLock()
+	log.Debugf("Check if response received already (handlecheckptHEADERS), peer=%v, "+
+		"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
+		req.StartHeight, req.EndHeight, BlkManagerQuery.Job.Index())
 	_, ok = b.hdrTipToResponse[req.StartHeight]
 	if ok {
 		log.Debugf("Response already received (handlecheckptHEADERS), peer=%v, "+
 			"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
 			req.StartHeight, req.EndHeight, BlkManagerQuery.Job.Index())
+		b.writeBatchMtx.RUnlock()
 		return
 	}
 	b.writeBatchMtx.RUnlock()
 
 	b.writeBatchMtx.Lock()
+	log.Debugf("Writing to handleResp (handlecheckptHEADERS), peer=%v, "+
+		"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
+		req.StartHeight, req.EndHeight, BlkManagerQuery.Job.Index())
 	b.hdrTipToResponse[req.StartHeight] = &respAndQuery{
 		response: msg,
 		Query:    BlkManagerQuery,
 	}
 	b.writeBatchMtx.Unlock()
-	b.writeBatchSignal.Broadcast()
 
 	workMgrResult := &query.BlkHdrJobResult{
 		Job:  BlkManagerQuery.Job,
 		Peer: msg.Peer,
 	}
 	HdrLength := len(msg.Headers.Headers)
+	log.Debugf("Check if to create new job (handlecheckptHEADERS), peer=%v, "+
+		"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
+		req.StartHeight, req.EndHeight, BlkManagerQuery.Job.Index())
 	if msg.Headers.Headers[HdrLength-1].BlockHash() != *req.StopHash {
 
 		newStartHeight := req.StartHeight + int32(HdrLength)
@@ -2346,30 +2377,14 @@ func (b *blockManager) writeCheckptHeaders() {
 
 	log.Debugf("writeCheckptHeaders started at initial height"+
 		"height=%v", b.headerTip)
-	b.writeBatchSignal.L.Lock()
-	for {
-		log.Debugf("Waiting for header batch broadcast for tip %v", b.headerTip)
-		b.writeBatchSignal.Wait()
-		log.Debugf("Gotten seekTip broadcast for tip %v", b.headerTip)
-		// While we're awake, we'll quickly check to see if we need to
-		// quit early.
-		select {
-		case <-b.quit:
-			b.writeBatchSignal.L.Unlock()
-			return
 
-		default:
-		}
+	for b.nextCheckpoint != nil {
 
-		b.writeBatchSignal.L.Unlock()
 		b.writeBatchMtx.RLock()
 		respDetails, ok := b.hdrTipToResponse[int32(b.headerTip)]
 		b.writeBatchMtx.RUnlock()
 
 		if !ok {
-			log.Debugf("Received non tip. Expected: "+
-				"height=%v", b.headerTip)
-			b.writeBatchSignal.L.Lock()
 			continue
 		}
 		req := respDetails.Query.Job.ReqDetails.(*headerQuery)
@@ -2380,9 +2395,15 @@ func (b *blockManager) writeCheckptHeaders() {
 		initialHdrTip := b.headerTip
 
 		b.syncPeerMutex.Lock()
+		log.Debugf("Updating sync peer"+
+			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.StartHeight, respDetails.response.Peer.Addr(),
+			respDetails.Query.Job.Index())
 		b.syncPeer = respDetails.response.Peer
 		b.syncPeerMutex.Unlock()
 
+		log.Debugf("Sending to handleheaders"+
+			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.StartHeight, respDetails.response.Peer.Addr(),
+			respDetails.Query.Job.Index())
 		b.handleHeadersMsg(respDetails.response)
 		b.resetHeaderListToChainTip()
 
@@ -2409,9 +2430,6 @@ func (b *blockManager) writeCheckptHeaders() {
 		log.Debugf("Sending result from writecheckpt loop")
 		query.SendResultToWorkMgr(respDetails.Query.Results,
 			workMgrResult, b.quit)
-		//Resend to wormanager for scheduling
-		log.Debugf("Acquired sync.cond signal in writecheckpt loop")
-		b.writeBatchSignal.L.Lock()
 	}
 	log.Debugf("End of for loop in writecheckpt loop")
 }
@@ -3121,7 +3139,7 @@ func (b *blockManager) writeHeaderBatch(headerWriteBatch []headerfs.BlockHeader)
 
 }
 func (b *blockManager) resetHeaderListToChainTip() error {
-
+	log.Debugf("Resetting headder list to chain tip")
 	header, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		return err
