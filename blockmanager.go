@@ -2216,10 +2216,35 @@ func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
 func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	peerQueryMap map[string]query.BlkManagerQuery) {
 	peer := msg.peer.(*ServerPeer)
+	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
+	b.writeBatchMtx.RLock()
+	_, ok := b.hdrTipToResponse[req.StartHeight]
+	if ok {
+		log.Debugf("Response already received (handlecheckptquery), peer=%v, "+
+			"start_height=%v, end_height=%v, index=%v", peer.Addr(),
+			req.StartHeight, req.EndHeight, msg.BlkManagerQuery.Job.Index())
+		return
+	}
+	b.writeBatchMtx.RUnlock()
+
+	peer.recentReqStartTime = time.Now()
+	err := peer.PushGetHeadersMsg(req.Locator, req.StopHash)
+	if err != nil {
+		log.Warnf("Error pushing headers: %v", err)
+		workMgrResult := &query.BlkHdrJobResult{
+			Job:  msg.BlkManagerQuery.Job,
+			Peer: peer,
+		}
+		workMgrResult.Err = errors.New("unable to push getheaders message")
+
+		log.Debugf("Sending result from handleCheckPtQuery fxn, most likely error with pushing")
+		query.SendResultToWorkMgr(msg.BlkManagerQuery.Results,
+			workMgrResult, b.quit)
+		return
+	}
 
 	peerQueryMap[peer.Addr()] = msg.BlkManagerQuery
-	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
-	log.Debugf("Added entry to peer query map, peer=%v, "+
+	log.Debugf("c=%v, "+
 		"start_height=%v, end_height=%v", peer.Addr(),
 		req.StartHeight, req.EndHeight)
 
@@ -2240,27 +2265,34 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		return
 	}
 	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
-	log.Debugf("Received header for peer %v, start_height=%v, end_height=%v",
-		msg.Peer.Addr(), req.StartHeight, req.EndHeight)
-
-	if !msg.Peer.Connected() {
-		log.Debugf("Peer=%v, start_height=%v, "+
-			"end_height=%v for Header Message is disconnected", msg.Peer.Addr(),
-			req.StartHeight, req.EndHeight)
-		delete(queryMap, msg.Peer.Addr())
-		return
-	}
+	log.Debugf("Received header for , start_height=%v, peer %v, end_height=%v",
+		req.StartHeight, msg.Peer.Addr(), req.EndHeight)
 
 	select {
-	case <-BlkManagerQuery.RespChan:
 	case BlkManagerQuery.RespChan <- struct{}{}:
 		log.Debugf("Peer=%v, start_height=%v, "+
 			"end_height=%v sent message to worker", msg.Peer.Addr(),
 			req.StartHeight, req.EndHeight)
+
+	case <-msg.Peer.OnDisconnect():
+		log.Debugf("In handlecheckpt,Peer=%v, start_height=%v, "+
+			"end_height=%v for Header Message is disconnected, continuing...", msg.Peer.Addr(),
+			req.StartHeight, req.EndHeight)
+		msg.Peer.UpdateRequestDuration()
 	case <-b.quit:
 		return
 	}
 	delete(queryMap, msg.Peer.Addr())
+
+	b.writeBatchMtx.RLock()
+	_, ok = b.hdrTipToResponse[req.StartHeight]
+	if ok {
+		log.Debugf("Response already received (handlecheckptHEADERS), peer=%v, "+
+			"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
+			req.StartHeight, req.EndHeight, BlkManagerQuery.Job.Index())
+		return
+	}
+	b.writeBatchMtx.RUnlock()
 
 	b.writeBatchMtx.Lock()
 	b.hdrTipToResponse[req.StartHeight] = &respAndQuery{
@@ -2299,7 +2331,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		workMgrResult.UnFinished = true
 
 		log.Debugf("Created new job from handleCheckpt fxn"+
-			"start_height=%v, end_height=%v", req.StartHeight, req.EndHeight)
+			"start_height=%v, end_height=%v", newStartHeight, req.EndHeight)
 
 		log.Debugf("Sending result from handleCheckpt fxn")
 		query.SendResultToWorkMgr(BlkManagerQuery.Results,
@@ -2378,10 +2410,10 @@ func (b *blockManager) writeCheckptHeaders() {
 		query.SendResultToWorkMgr(respDetails.Query.Results,
 			workMgrResult, b.quit)
 		//Resend to wormanager for scheduling
-
+		log.Debugf("Acquired sync.cond signal in writecheckpt loop")
 		b.writeBatchSignal.L.Lock()
 	}
-
+	log.Debugf("End of for loop in writecheckpt loop")
 }
 
 func (b *blockManager) SyncPeer() *ServerPeer {

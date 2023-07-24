@@ -325,8 +325,9 @@ func (w *blkHdrWorker) Run(results chan<- *BlkHdrJobResult, quit <-chan struct{}
 
 nextJobLoop:
 	var (
-		job    *BlkHdrQueryJob
-		jobErr error
+		job     *BlkHdrQueryJob
+		jobErr  error
+		timeout *time.Timer
 	)
 	for {
 		log.Debugf("Worker %v waiting for more work", peer.Addr())
@@ -365,16 +366,17 @@ nextJobLoop:
 			log.Debugf("Worker %v queuing job %T with index %v",
 				peer.Addr(), job.ReqDetails, job.Index())
 
-			err := peer.QueryGetHeadersMsg(job.ReqDetails)
-			if err != nil {
-				log.Debugf("Peer %v could not push GetHeaders Msg: %v",
-					peer.Addr(), err)
-				return
-			}
 			blkQuery.Job = *job
 			job.SendQueryToBlkMgr(
 				peer, blkQuery,
 			)
+			queryTimeout := peer.PeerTimeout()
+			if peer.LastReqDuration() > MinQueryTimeout &&
+				peer.LastReqDuration() < MaxQueryTimeout {
+
+				queryTimeout = peer.LastReqDuration()
+			}
+			timeout = time.NewTimer(queryTimeout)
 			goto feedbackLoop
 		}
 	}
@@ -383,7 +385,7 @@ nextJobLoop:
 feedbackLoop:
 	// Wait for the correct response to be received from the peer,
 	// or an error happening.
-	timeout := time.NewTimer(job.Timeout)
+
 	for {
 		select {
 		// A header has been received for the query.
@@ -410,11 +412,11 @@ feedbackLoop:
 			if jobErr == ErrQueryTimeout {
 
 				peer.UpdateRequestDuration()
-				goto nextJobLoop
+
 			}
 
 			jobErr = ErrPeerDisconnected
-			blkQuery.RespChan <- struct{}{}
+			//blkQuery.RespChan <- struct{}{}
 
 		// If the job was canceled, we report this back to the
 		// work manager.
@@ -425,10 +427,10 @@ feedbackLoop:
 			jobErr = ErrJobCanceled
 
 		case <-quit:
-			blkQuery.RespChan <- struct{}{}
 			return
 		}
-		// Stop to allow garbage collection.
+		// Stop to allow garbage collection .
+		timeout.Stop()
 
 		//Send error result from worker to workManager.
 		log.Debugf("SendResultToWorkMgr from worker loop")
@@ -443,7 +445,7 @@ feedbackLoop:
 			return
 		}
 
-		if jobErr == ErrJobCanceled {
+		if jobErr == ErrQueryTimeout {
 			goto feedbackLoop
 		}
 		// If it is not a peer disconnect continue polling for work

@@ -174,7 +174,9 @@ type BlkHdrPeer interface {
 	// the query's start height.
 	IsPeerBehindStartHeight(req interface{}) bool
 
-	LastReqDuration() int64
+	LastReqDuration() time.Duration
 
 	UpdateRequestDuration()
+
+	PeerTimeout() time.Duration
 }

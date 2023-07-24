@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	// minQueryTimeout is the timeout a query will be initially given. If
+	// MinQueryTimeout is the timeout a query will be initially given. If
 	// the peer given the query fails to respond within the timeout, it
 	// will be given to the next peer with an increased timeout.
-	minQueryTimeout = 2 * time.Second
+	MinQueryTimeout = 2 * time.Second
 
-	// maxQueryTimeout is the maximum timeout given to a single query.
-	maxQueryTimeout = 32 * time.Second
+	// MaxQueryTimeout is the maximum timeout given to a single query.
+	MaxQueryTimeout = 32 * time.Second
 )
 
 var (
@@ -370,8 +370,8 @@ Loop:
 				// it for the next attempt.
 				if result.err == ErrQueryTimeout {
 					newTimeout := result.job.timeout * 2
-					if newTimeout > maxQueryTimeout {
-						newTimeout = maxQueryTimeout
+					if newTimeout > MaxQueryTimeout {
+						newTimeout = MaxQueryTimeout
 					}
 					result.job.timeout = newTimeout
 				}
@@ -438,7 +438,7 @@ Loop:
 			for _, q := range batch.requests {
 				heap.Push(work, &queryJob{
 					index:      queryIndex,
-					timeout:    minQueryTimeout,
+					timeout:    MinQueryTimeout,
 					encoding:   batch.options.encoding,
 					cancelChan: batch.options.cancelChan,
 					Request:    q,
@@ -715,7 +715,7 @@ func (w *WorkManager) testWorkDispatcher() {
 			for _, q := range batch.requests {
 				heap.Push(testWork, &BlkHdrQueryJob{
 					JobIndex:      queryIndex,
-					Timeout:       minQueryTimeout,
+					Timeout:       MinQueryTimeout,
 					encoding:      batch.options.encoding,
 					cancelChan:    batch.options.cancelChan,
 					BlkHdrRequest: *q,

@@ -181,20 +181,21 @@ type ServerPeer struct {
 	mtxSubscribers   sync.RWMutex
 
 	recentReqStartTime time.Time
-	recentReqDuration  int64
+	recentReqDuration  time.Duration
+	reqTimeout         time.Duration
 }
 
 // NewServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:            s,
-		persistent:        isPersistent,
-		knownAddresses:    lru.NewCache[string, *cachedAddr](5000),
-		quit:              make(chan struct{}, 2),
-		recvSubscribers:   make(map[spMsgSubscription]struct{}),
-		recvSubscribers2:  make(map[msgSubscription]struct{}),
-		recentReqDuration: time.Duration(0).Nanoseconds(),
+		server:           s,
+		persistent:       isPersistent,
+		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
+		quit:             make(chan struct{}, 2),
+		recvSubscribers:  make(map[spMsgSubscription]struct{}),
+		recvSubscribers2: make(map[msgSubscription]struct{}),
+		reqTimeout:       query.MinQueryTimeout,
 	}
 }
 
@@ -209,7 +210,7 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 	return &bestHash, int32(bestHeight), nil
 }
 
-func (sp *ServerPeer) LastReqDuration() int64 {
+func (sp *ServerPeer) LastReqDuration() time.Duration {
 	return sp.recentReqDuration
 }
 
@@ -561,7 +562,13 @@ func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
 func (sp *ServerPeer) UpdateRequestDuration() {
 
 	duration := time.Since(sp.recentReqStartTime)
-	sp.recentReqDuration = duration.Nanoseconds()
+	sp.recentReqDuration = duration
+	log.Debugf("Peer=%v, updated duration to=%v", sp.Addr(), duration.Nanoseconds())
+}
+
+func (sp *ServerPeer) PeerTimeout() time.Duration {
+
+	return sp.reqTimeout
 }
 
 func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {

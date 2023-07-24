@@ -79,22 +79,6 @@ func (p *expPeerRanking) Order(peers []BlkHdrPeer) {
 }
 
 // AddPeer adds a new peer to the ranking, starting out with the default score.
-func (p *expPeerRanking) AddPeer(peer string) {
-
-	p.mutex.RLock()
-	if _, ok := p.rank[peer]; ok {
-
-		p.mutex.RUnlock()
-		return
-	}
-
-	p.mutex.RUnlock()
-	p.mutex.Lock()
-	p.rank[peer] = 0
-	p.mutex.Unlock()
-}
-
-// AddPeer adds a new peer to the ranking, starting out with the default score.
 func (p *peerRanking) AddPeer(peer string) {
 
 	p.mutex.RLock()
