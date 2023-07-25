@@ -2141,6 +2141,7 @@ func (b *blockManager) blockHandler() {
 	// Obtaining chainTip here even though it might not be needed if
 	// the network has no checkpoints to prevent the error that arises
 	// from goto jumping a variable declaration.
+	i := 0
 	peerQueryMap := make(map[string]query.BlkManagerQuery)
 	candidatePeers := list.New()
 	checkpoints := b.cfg.ChainParams.Checkpoints
@@ -2173,19 +2174,27 @@ func (b *blockManager) blockHandler() {
 unCheckPtLoop:
 	for {
 		// Now check peer messages and quit channels.
+		i++
+		if i == 1 {
+			log.Debugf("Insde Uncheckpt loop")
+		}
 		select {
 		case m := <-b.peerChan:
 			switch msg := m.(type) {
 			case *newPeerMsg:
+				log.Debugf("Added new peer")
 				b.handleNewPeerMsg(candidatePeers, msg.peer)
 
 			case *invMsg:
+				log.Debugf("Peer chan inv message")
 				b.handleInvMsg(msg)
 
 			case *HeadersMsg:
+				log.Debugf("Peer chan headers msg")
 				b.handleHeadersMsg(msg)
 
 			case *donePeerMsg:
+				log.Debugf("Peer chan done peer msg")
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
 
 			default:
@@ -2406,7 +2415,7 @@ func (b *blockManager) writeCheckptHeaders() {
 			respDetails.Query.Job.Index())
 		b.handleHeadersMsg(respDetails.response)
 		b.resetHeaderListToChainTip()
-
+		log.Debugf("New headertip %v", b.headerTip)
 		workMgrResult := &query.BlkHdrJobResult{
 			Job:  respDetails.Query.Job,
 			Peer: respDetails.response.Peer,
@@ -3066,7 +3075,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 		}
 	}
 
-	log.Tracef("Writing header batch of %v block headers",
+	log.Debugf("Writing header batch of %v block headers",
 		len(headerWriteBatch))
 
 	if len(headerWriteBatch) > 0 {
@@ -3111,7 +3120,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *HeadersMsg) {
 }
 
 func (b *blockManager) resetHeaderListToChainTip() error {
-	log.Debugf("Resetting headder list to chain tip")
+	log.Debugf("Resetting headder list to chain tip %v ", b.headerTip)
 	header, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		return err
