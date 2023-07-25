@@ -210,6 +210,13 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 	return &bestHash, int32(bestHeight), nil
 }
 
+// isSyncCandidate returns whether or not the peer is a candidate to consider
+// syncing from.
+func (sp *ServerPeer) isSyncCandidate() bool {
+	// The peer is not a candidate for sync if it's not a full node.
+	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
+}
+
 func (sp *ServerPeer) LastReqDuration() time.Duration {
 	return sp.recentReqDuration
 }

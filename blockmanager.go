@@ -406,7 +406,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	log.Infof("New valid peer %s (%s)", sp, sp.UserAgent())
 
 	// Ignore the peer if it's not a sync candidate.
-	if !b.isSyncCandidate(sp) {
+	if !sp.isSyncCandidate() {
 		return
 	}
 
@@ -2448,13 +2448,6 @@ func (b *blockManager) SyncPeer() *ServerPeer {
 	defer b.syncPeerMutex.Unlock()
 
 	return b.syncPeer
-}
-
-// isSyncCandidate returns whether or not the peer is a candidate to consider
-// syncing from.
-func (b *blockManager) isSyncCandidate(sp *ServerPeer) bool {
-	// The peer is not a candidate for sync if it's not a full node.
-	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
 }
 
 // findNextHeaderCheckpoint returns the next checkpoint after the passed height.
