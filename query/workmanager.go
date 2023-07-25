@@ -599,8 +599,8 @@ func (w *WorkManager) testWorkDispatcher() {
 		// connects.
 		case peer := <-peersConnected:
 			testPeer, _ := peer.(BlkHdrPeer)
-			if !b.isSyncCandidate(sp) {
-				return
+			if !testPeer.IsSyncCandidate() {
+				continue
 			}
 
 			r := w.cfg.NewBlkHdrWorker(testPeer)

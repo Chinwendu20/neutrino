@@ -82,10 +82,6 @@ type checkPtQuery struct {
 	BlkManagerQuery query.BlkManagerQuery
 }
 
-type timedOutMsg struct {
-	peer query.BlkHdrPeer
-}
-
 // blockManagerCfg holds options and dependencies needed by the blockManager
 // during operation.
 type blockManagerCfg struct {
@@ -393,6 +389,25 @@ func (b *blockManager) NewPeer(sp *ServerPeer) {
 	}
 }
 
+func (b *blockManager) addNewPeerToList(peers *list.List, sp *ServerPeer) {
+
+	// Ignore if in the process of shutting down.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	log.Infof("New valid peer %s (%s)", sp, sp.UserAgent())
+
+	// Ignore the peer if it's not a sync candidate.
+	if !sp.IsSyncCandidate() {
+		return
+	}
+
+	// Add the peer as a candidate to sync from.
+	peers.PushBack(sp)
+
+}
+
 // handleNewPeerMsg deals with new peers that have signalled they may be
 // considered as a sync peer (they have already successfully negotiated).  It
 // also starts syncing if needed.  It is invoked from the syncHandler
@@ -402,29 +417,17 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
 	}
-
-	log.Infof("New valid peer %s (%s)", sp, sp.UserAgent())
-
-	// Ignore the peer if it's not a sync candidate.
-	if !sp.isSyncCandidate() {
-		return
-	}
-
-	// Add the peer as a candidate to sync from.
-	peers.PushBack(sp)
-
-	//// If we're current with our sync peer and the new peer is advertising
-	//// a higher block than the newest one we know of, request headers from
-	//// the new peer.
+	b.addNewPeerToList(peers, sp)
+	// If we're current with our sync peer and the new peer is advertising
+	// a higher block than the newest one we know of, request headers from
+	// the new peer.
 	_, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Criticalf("Couldn't retrieve block header chain tip: %s",
 			err)
 		return
 	}
-
 	if height < uint32(sp.StartingHeight()) && b.BlockHeadersSynced() {
-
 		locator, err := b.cfg.BlockHeaders.LatestBlockLocator()
 		if err != nil {
 			log.Criticalf("Couldn't retrieve latest block "+
@@ -433,24 +436,10 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 		}
 		stopHash := &zeroHash
 		_ = sp.PushGetHeadersMsg(locator, stopHash)
-
 	}
 
-	checkpoints := b.cfg.ChainParams.Checkpoints
-	numCheckPoints := len(checkpoints)
-
-	if numCheckPoints == 0 {
-
-		b.startSync(peers)
-		return
-	}
-
-	if height > uint32(checkpoints[numCheckPoints-1].Height) {
-
-		// Start syncing by choosing the best candidate if needed.
-		b.startSync(peers)
-	}
-
+	// Start syncing by choosing the best candidate if needed.
+	b.startSync(peers)
 }
 
 // DonePeer informs the blockmanager that a peer has disconnected.
@@ -467,12 +456,7 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 	}
 }
 
-// handleDonePeerMsg deals with peers that have signalled they are done.  It
-// removes the peer as a candidate for syncing and in the case where it was the
-// current sync peer, attempts to select a new best peer to sync from.  It is
-// invoked from the syncHandler goroutine.
-func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
-
+func (b *blockManager) removeDonePeerFromList(peers *list.List, sp *ServerPeer) {
 	//Remove the peer from the list of candidate peers.
 	for e := peers.Front(); e != nil; e = e.Next() {
 		if e.Value == sp {
@@ -482,7 +466,15 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
+}
 
+// handleDonePeerMsg deals with peers that have signalled they are done.  It
+// removes the peer as a candidate for syncing and in the case where it was the
+// current sync peer, attempts to select a new best peer to sync from.  It is
+// invoked from the syncHandler goroutine.
+func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
+
+	b.removeDonePeerFromList(peers, sp)
 	//Attempt to find a new peer to sync from if the quitting peer is the
 	//sync peer.  Also, reset the header state.
 	if b.SyncPeer() != nil && b.SyncPeer() == sp && b.BlockHeadersSynced() {
@@ -996,18 +988,9 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.BlkHdrRequest {
 		reqs[idx] = &query.BlkHdrRequest{
 			ReqDetails:        m,
 			SendQueryToBlkMgr: c.handleResponse,
-			HandleTimeOut:     c.handleTimeOut,
 		}
 	}
 	return reqs
-}
-
-func (c *CheckpointedBlockHeadersQuery) handleTimeOut(peer query.BlkHdrPeer) {
-	select {
-	case c.blockMgr.peerChan <- &timedOutMsg{peer: peer}:
-	case <-c.blockMgr.quit:
-		return
-	}
 }
 
 // handleResponse is the internal response handler used for requests for this
@@ -2141,7 +2124,6 @@ func (b *blockManager) blockHandler() {
 	// Obtaining chainTip here even though it might not be needed if
 	// the network has no checkpoints to prevent the error that arises
 	// from goto jumping a variable declaration.
-	i := 0
 	peerQueryMap := make(map[string]query.BlkManagerQuery)
 	candidatePeers := list.New()
 	checkpoints := b.cfg.ChainParams.Checkpoints
@@ -2159,8 +2141,10 @@ func (b *blockManager) blockHandler() {
 				b.handleCheckPtQuery(msg, peerQueryMap)
 			case *HeadersMsg:
 				b.handleCheckPtHeaders(peerQueryMap, msg)
-			case *timedOutMsg:
-				b.handleTimedOutMsg(msg, peerQueryMap)
+			case *newPeerMsg:
+				b.addNewPeerToList(candidatePeers, msg.peer)
+			case *donePeerMsg:
+				b.removeDonePeerFromList(candidatePeers, msg.peer)
 			default:
 				log.Warnf("Invalid message type in block "+
 					"handler: %T", msg)
@@ -2170,21 +2154,17 @@ func (b *blockManager) blockHandler() {
 
 		}
 	}
+	b.startSync(candidatePeers)
 
 unCheckPtLoop:
 	for {
 		// Now check peer messages and quit channels.
-		i++
-		if i == 1 {
-			log.Debugf("Insde Uncheckpt loop")
-		}
 		select {
 		case m := <-b.peerChan:
 			switch msg := m.(type) {
 			case *newPeerMsg:
 				log.Debugf("Added new peer")
 				b.handleNewPeerMsg(candidatePeers, msg.peer)
-
 			case *invMsg:
 				log.Debugf("Peer chan inv message")
 				b.handleInvMsg(msg)
@@ -2210,24 +2190,18 @@ unCheckPtLoop:
 	log.Trace("Block handler done")
 }
 
-func (b *blockManager) handleTimedOutMsg(msg *timedOutMsg,
-	peerQueryMap map[string]query.BlkManagerQuery) {
-	peer := msg.peer.(*ServerPeer)
-	BlkManagerQuery, _ := peerQueryMap[peer.Addr()]
-	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
-	log.Debugf("Peer=%v, start_height=%v, "+
-		"end_height=%v handling time out", peer.Addr(),
-		req.StartHeight, req.EndHeight)
-	delete(peerQueryMap, peer.Addr())
-
-}
-
 func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	peerQueryMap map[string]query.BlkManagerQuery) {
+
+	// Ignore if in the process of shutting down.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
 	peer := msg.peer.(*ServerPeer)
 	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
 	b.writeBatchMtx.RLock()
-	log.Debugf("Checkiing if resp to query exists (handleCheckPtQuery), peer=%v, "+
+	log.Debugf("Checking if resp to query exists (handleCheckPtQuery), peer=%v, "+
 		"start_height=%v, end_height=%v, index=%v", peer.Addr(),
 		req.StartHeight, req.EndHeight, msg.BlkManagerQuery.Job.Index())
 	_, ok := b.hdrTipToResponse[req.StartHeight]
@@ -2288,6 +2262,12 @@ type respAndQuery struct {
 
 func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManagerQuery,
 	msg *HeadersMsg) {
+
+	// Ignore if in the process of shutting down.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
 	msg.Peer.UpdateRequestDuration()
 	BlkManagerQuery, ok := queryMap[msg.Peer.Addr()]
 

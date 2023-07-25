@@ -179,4 +179,6 @@ type BlkHdrPeer interface {
 	UpdateRequestDuration()
 
 	PeerTimeout() time.Duration
+
+	IsSyncCandidate() bool
 }
