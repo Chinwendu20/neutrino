@@ -585,7 +585,7 @@ func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {
 
 		return true
 	}
-	if sp.LastBlock() < queryGetHeaders.StartHeight {
+	if sp.LastBlock() < queryGetHeaders.startHeight {
 
 		return false
 

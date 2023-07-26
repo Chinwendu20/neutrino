@@ -30,6 +30,8 @@ type queryOptions struct {
 	// cancelChan is an optional channel that can be closed to indicate
 	// that the query should be canceled.
 	cancelChan chan struct{}
+
+	errChan chan error
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -78,6 +80,12 @@ func Cancel(cancel chan struct{}) QueryOption {
 	}
 }
 
+func ErrChan(error chan error) QueryOption {
+	return func(qo *queryOptions) {
+		qo.errChan = error
+	}
+}
+
 // Progress encloses the result of handling a response for a given Request,
 // determining whether the response did progress the query.
 type Progress struct {
@@ -110,21 +118,8 @@ type Request struct {
 	// The response should be handed off to another goroutine for
 	// processing.
 	HandleResp func(req, resp wire.Message, peer string) Progress
-}
 
-type BlkHdrRequest struct {
-	// ReqDetails is the struct that holds the arguments needed
-	// for the getheaders request as well as other fields requires to
-	// continuously create new job for the request and handle the header
-	//response
-	ReqDetails interface{}
-
-	// Sends the getheader message to GetHeaderQuery to be pushed to request
-	// for headers. It also notifies the block manager of the new headerQuery
-	SendQueryToBlkMgr func(peer BlkHdrPeer, blkQuery BlkManagerQuery)
-
-	// Notifies the blockmanager of a header timeout
-	HandleTimeOut func(peer BlkHdrPeer)
+	SendToAnotherGoroutine func(peer BlkHdrPeer, blkQuery interface{})
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
@@ -135,9 +130,6 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
-
-	// GetHeaderQuery pushes the getheader message to request for headers from a peer
-	GetHeaderQuery(reqs []*BlkHdrRequest, options ...QueryOption)
 }
 
 // Peer is the interface that defines the methods needed by the query package

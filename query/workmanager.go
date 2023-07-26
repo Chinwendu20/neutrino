@@ -26,7 +26,6 @@ var (
 type batch struct {
 	requests []*Request
 	options  *queryOptions
-	errChan  chan error
 }
 
 // Worker is the interface that must be satisfied by workers managed by the
@@ -124,8 +123,7 @@ type WorkManager struct {
 	// workers will be sent.
 	jobResults chan *jobResult
 
-	getHdrBatch chan *blkHdrBatch
-	NewWorker   func(Peer) Worker
+	NewWorker func(Peer) Worker
 
 	quit          chan struct{}
 	wg            sync.WaitGroup
@@ -142,7 +140,6 @@ func New(cfg *Config) *WorkManager {
 		newBatches:    make(chan *batch),
 		jobResults:    make(chan *jobResult),
 		quit:          make(chan struct{}),
-		getHdrBatch:   make(chan *blkHdrBatch),
 		HdrJobResults: make(chan *BlkHdrJobResult, 2),
 	}
 }
@@ -597,6 +594,7 @@ func (w *WorkManager) testWorkDispatcher() {
 		select {
 		// Spin up a goroutine that runs a worker each time a peer
 		// connects.
+
 		case peer := <-peersConnected:
 			testPeer, _ := peer.(BlkHdrPeer)
 			if !testPeer.IsSyncCandidate() {
@@ -750,27 +748,21 @@ func (w *WorkManager) Query(requests []*Request,
 
 	errChan := make(chan error, 1)
 
-	// Add query messages to the queue of batches to handle.
-	select {
-	case w.newBatches <- &batch{
+	newBatch := &batch{
 		requests: requests,
 		options:  qo,
-		errChan:  errChan,
-	}:
+	}
+	// Add query messages to the queue of batches to handle.
+	select {
+	case w.newBatches <- newBatch:
 	case <-w.quit:
 		errChan <- ErrWorkManagerShuttingDown
 	}
 
-	return errChan
+	return newBatch.options.errChan
 }
 
-type blkHdrBatch struct {
-	requests []*BlkHdrRequest
-	options  *queryOptions
-	errChan  chan error
-}
-
-func (w *WorkManager) GetHeaderQuery(requests []*BlkHdrRequest,
+func (w *WorkManager) GetHeaderQuery(requests []*Request,
 	options ...QueryOption) {
 	log.Debugf("Testing query")
 	qo := defaultQueryOptions()
@@ -778,7 +770,7 @@ func (w *WorkManager) GetHeaderQuery(requests []*BlkHdrRequest,
 
 	// Add query messages to the queue of batches to handle.
 	select {
-	case w.getHdrBatch <- &blkHdrBatch{
+	case w.newBatches <- &batch{
 		requests: requests,
 		options:  qo,
 	}:

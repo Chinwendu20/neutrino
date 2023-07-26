@@ -231,13 +231,13 @@ package neutrino
 //		}
 //
 //		// The start height must be set to a checkpoint height+1.
-//		if q.StartHeight%wire.CFCheckptInterval != 1 {
+//		if q.startHeight%wire.CFCheckptInterval != 1 {
 //			return nil, fmt.Errorf("unexpexted start height %v",
-//				q.StartHeight)
+//				q.startHeight)
 //		}
 //
 //		var prevFilterHeader chainhash.Hash
-//		switch q.StartHeight {
+//		switch q.startHeight {
 //		// If the start height is 1 the prevFilterHeader is set to the
 //		// genesis header.
 //		case 1:
@@ -246,7 +246,7 @@ package neutrino
 //
 //		// Otherwise we use one of the created checkpoints.
 //		default:
-//			j := q.StartHeight/wire.CFCheckptInterval - 1
+//			j := q.startHeight/wire.CFCheckptInterval - 1
 //			prevFilterHeader = *headers.checkpoints[j]
 //		}
 //
@@ -257,7 +257,7 @@ package neutrino
 //		}
 //
 //		// Keep adding filter hashes until we reach the stop hash.
-//		for h := q.StartHeight; ; h++ {
+//		for h := q.startHeight; ; h++ {
 //			resp.FilterHashes = append(
 //				resp.FilterHashes, &headers.filterHashes[h],
 //			)
