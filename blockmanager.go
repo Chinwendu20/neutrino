@@ -100,8 +100,11 @@ type blockManagerCfg struct {
 	// the connected peers.
 	TimeSource blockchain.MedianTimeSource
 
-	// QueryDispatcher is used to make queries to connected Bitcoin peers.
-	QueryDispatcher query.Dispatcher
+	// CfHdrQueryDispatcher is used to make queries to connected Bitcoin peers.
+	CfHdrQueryDispatcher query.Dispatcher
+
+	// BlkHdrQueryDispatcher is used to make queries to connected Bitcoin peers.
+	BlkHdrQueryDispatcher query.Dispatcher
 
 	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
@@ -1016,11 +1019,12 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
 func (c *CheckpointedBlockHeadersQuery) sendQueryToBlkMgr(worker query.Worker,
 	job query.Task) {
 
+	queryJob := job.(*query.QueryJob)
 	select {
 	case c.blockMgr.peerChan <- &checkPtQuery{peer: worker.Peer(),
 		BlkManagerQuery: query.BlkManagerQuery{
 			RespChan: worker.RespChan(),
-			Job:      job,
+			Job:      *queryJob,
 		},
 	}:
 	case <-c.blockMgr.quit:
@@ -1077,9 +1081,8 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 	log.Infof("Attempting to query for %v blockheader batches", len(queryMsgs))
 
 	q := CheckpointedBlockHeadersQuery{
-		blockMgr:   b,
-		msgs:       queryMsgs,
-		headerChan: make(chan extendedHeaderMsg),
+		blockMgr: b,
+		msgs:     queryMsgs,
 	}
 
 	go b.cfg.QueryDispatcher.Query(
@@ -2383,7 +2386,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 			"start_height=%v, end_height=%v", newStartHeight, req.endHeight)
 
 		log.Debugf("Sending result from handleCheckpt fxn")
-		query.SendResultToWorkMgr(BlkManagerQuery.Results,
+		query.SendResultToWorkMgr(b.cfg.QueryDispatcher.ResultChan(),
 			workMgrResult, b.quit)
 
 	}
@@ -2432,22 +2435,15 @@ func (b *blockManager) writeCheckptHeaders() {
 		if b.headerTip <= initialHdrTip {
 
 			workMgrResult.Err = errors.New("invalid headers")
-			workMgrResult.Job.ReqDetails = &headerQuery{
-				Locator:       []*chainhash.Hash{&b.headerTipHash},
-				StopHash:      req.StopHash,
+			reqMessage := req.Message.(*wire.MsgGetHeaders)
+			workMgrResult.Job.Request.Req = &headerQuery{
+				Message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{&b.headerTipHash},
+					HashStop:           reqMessage.HashStop,
+				},
 				startHeight:   int32(b.headerTip),
 				endHeight:     req.endHeight,
 				startHash:     b.headerTipHash,
-				initialHeight: req.startHeight,
-			}
-			workMgrResult.Job.Request.Req = &headerQuery{
-				Message: &wire.MsgGetHeaders{
-					BlockLocatorHashes: []*chainhash.Hash{&newStartHash},
-					HashStop:           reqMessage.HashStop,
-				},
-				startHeight:   newStartHeight,
-				endHeight:     req.endHeight,
-				startHash:     newStartHash,
 				initialHeight: req.startHeight,
 			}
 
@@ -2455,7 +2451,7 @@ func (b *blockManager) writeCheckptHeaders() {
 				"start_height=%v, end_height=%v", req.startHeight, req.endHeight)
 
 			log.Debugf("Sending result from writecheckpt loop")
-			query.SendResultToWorkMgr(respDetails.Query.Results,
+			query.SendResultToWorkMgr(b.cfg.QueryDispatcher.ResultChan(),
 				workMgrResult, b.quit)
 		}
 

@@ -548,24 +548,6 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	}
 }
 
-func (sp *ServerPeer) QueryGetHeadersMsg(req interface{}) error {
-	start := time.Now()
-	sp.recentReqStartTime = start
-	queryGetHeaders, ok := req.(*headerQuery)
-
-	if !ok {
-		return errors.New("request is not type headerQuery")
-	}
-	log.Debugf("Querygetheaders pushing headers message")
-	err := sp.PushGetHeadersMsg(queryGetHeaders.Locator, queryGetHeaders.StopHash)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (sp *ServerPeer) UpdateRequestDuration() {
 
 	duration := time.Since(sp.recentReqStartTime)
@@ -728,7 +710,8 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
-	workManager          *query.WorkManager
+	cfHdrWorkManager     *query.WorkManager
+	blkHdrWorkManager    *query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -804,14 +787,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
-	s.workManager = query.New(&query.Config{
-		ConnectedPeers:  s.ConnectedPeers,
-		NewWorker:       query.NewWorker,
-		Ranking:         query.NewPeerRanking(),
-		NewBlkHdrWorker: query.NewBlkHdrWorker,
-		ERanking:        query.NewExpPeerRanking(),
+	s.cfHdrWorkManager = query.New(&query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Ranking:        query.NewPeerRanking(),
 	})
-
+	s.blkHdrWorkManager = query.New(&query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Ranking:        query.NewPeerRanking(),
+	})
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
 	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
@@ -862,15 +847,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
-		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
-		QueryDispatcher:  s.workManager,
-		BanPeer:          s.BanPeer,
-		GetBlock:         s.GetBlock,
-		firstPeerSignal:  s.firstPeerConnect,
-		queryAllPeers:    s.queryAllPeers,
+		ChainParams:           s.chainParams,
+		BlockHeaders:          s.BlockHeaders,
+		RegFilterHeaders:      s.RegFilterHeaders,
+		TimeSource:            s.timeSource,
+		CfHdrQueryDispatcher:  s.cfHdrWorkManager,
+		BlkHdrQueryDispatcher: s.blkHdrWorkManager,
+		BanPeer:               s.BanPeer,
+		GetBlock:              s.GetBlock,
+		firstPeerSignal:       s.firstPeerConnect,
+		queryAllPeers:         s.queryAllPeers,
 	})
 	if err != nil {
 		return nil, err
@@ -1672,7 +1658,7 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
-	if err := s.workManager.Start(); err != nil {
+	if err := s.cfHdrWorkManager.Start(); err != nil {
 		return fmt.Errorf("unable to start work manager: %v", err)
 	}
 
@@ -1710,7 +1696,7 @@ func (s *ChainService) Stop() error {
 		log.Errorf("error stopping utxo scanner: %v", err)
 		returnErr = err
 	}
-	if err := s.workManager.Stop(); err != nil {
+	if err := s.cfHdrWorkManager.Stop(); err != nil {
 		log.Errorf("error stopping work manager: %v", err)
 		returnErr = err
 	}

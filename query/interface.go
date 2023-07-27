@@ -117,7 +117,7 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peer string) Progress
+	HandleResp func(req, resp wire.Message, peer BlkHdrPeer) Progress
 
 	SendQuery func(worker Worker, job Task)
 }
@@ -160,9 +160,6 @@ type Peer interface {
 // to be able to make getheader requests and receive responses from a network peer.
 type BlkHdrPeer interface {
 	Peer
-
-	// QueryGetHeadersMsg sends the getheaders message to the peer.
-	QueryGetHeadersMsg(req interface{}) error
 
 	// IsPeerBehindStartHeight checks if the peer's height is behind
 	// the query's start height.
