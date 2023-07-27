@@ -221,7 +221,8 @@ type blockManager struct { // nolint:maligned
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
-	hdrTipToResponse    map[int32]*respAndQuery
+
+	hdrTipToResponse map[int32]*respAndQuery
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -841,11 +842,12 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 // checkpointedCFHeadersQuery holds all information necessary to perform and
 // handle a query for checkpointed filter headers.
 type checkpointedCFHeadersQuery struct {
-	blockMgr    *blockManager
-	msgs        []wire.Message
-	checkpoints []*chainhash.Hash
-	stopHashes  map[chainhash.Hash]uint32
-	headerChan  chan *wire.MsgCFHeaders
+	blockMgr       *blockManager
+	msgs           []wire.Message
+	checkpoints    []*chainhash.Hash
+	stopHashes     map[chainhash.Hash]uint32
+	headerChan     chan *wire.MsgCFHeaders
+	queryResponses map[uint32]*wire.MsgCFHeaders
 }
 
 // requests creates the query.Requests for this CF headers query.
@@ -855,19 +857,51 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 		reqs[idx] = &query.Request{
 			Req:        m,
 			HandleResp: c.handleResponse,
+			SendQuery:  c.sendQuery,
 		}
 	}
 	return reqs
 }
 
+func (c *checkpointedCFHeadersQuery) sendQuery(worker query.Worker,
+	job query.Task) {
+
+	peer, _ := worker.Peer().(*ServerPeer)
+	peer.recentReqStartTime = time.Now()
+	peer.QueueMessageWithEncoding(job.JobRequest(), nil, job.Encoding())
+
+}
+
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peerAddr string) query.Progress {
+	peer query.BlkHdrPeer) query.Progress {
+
+	peer.UpdateRequestDuration()
+	peerAddr := peer.Addr()
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
 		// We are only looking for cfheaders messages.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	checkPointIndex, ok := c.stopHashes[r.StopHash]
+	if !ok {
+		// We never requested a matching stop hash.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	_, ok = c.queryResponses[checkPointIndex]
+	if ok {
+
+		// We have a response already for this checkpoint
 		return query.Progress{
 			Finished:   false,
 			Progressed: false,
@@ -886,15 +920,6 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 	// The response doesn't match the query.
 	if q.FilterType != r.FilterType || q.StopHash != r.StopHash {
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
-	}
-
-	checkPointIndex, ok := c.stopHashes[r.StopHash]
-	if !ok {
-		// We never requested a matching stop hash.
 		return query.Progress{
 			Finished:   false,
 			Progressed: false,
@@ -966,17 +991,11 @@ type headerQuery struct {
 	endHeight     int32
 }
 
-type extendedHeaderMsg struct {
-	HeadersMsg
-	headerQuery
-}
-
 // CheckpointedBlockHeadersQuery holds all information necessary to perform and
 // handle a query for checkpointed block headers.
 type CheckpointedBlockHeadersQuery struct {
-	blockMgr   *blockManager
-	msgs       []*headerQuery
-	headerChan chan extendedHeaderMsg
+	blockMgr *blockManager
+	msgs     []*headerQuery
 }
 
 func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
@@ -985,8 +1004,8 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
 	reqs := make([]*query.Request, len(c.msgs))
 	for idx, m := range c.msgs {
 		reqs[idx] = &query.Request{
-			Req:                    m,
-			SendToAnotherGoroutine: c.sendQueryToBlkMgr,
+			Req:       m,
+			SendQuery: c.sendQueryToBlkMgr,
 		}
 	}
 	return reqs
@@ -994,18 +1013,15 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
 
 // sendQueryToBlkMgr is the internal response handler used for requests for this
 // block Headers query.
-func (c *CheckpointedBlockHeadersQuery) sendQueryToBlkMgr(peer query.BlkHdrPeer,
-	blkQuery interface{}) {
+func (c *CheckpointedBlockHeadersQuery) sendQueryToBlkMgr(worker query.Worker,
+	job query.Task) {
 
-	Query, ok := blkQuery.(query.BlkManagerQuery)
-
-	if !ok {
-		log.Errorf("Received type of Query is not of " +
-			"Expected type: BlkManagerQuery")
-	}
 	select {
-	case c.blockMgr.peerChan <- &checkPtQuery{peer: peer,
-		BlkManagerQuery: Query,
+	case c.blockMgr.peerChan <- &checkPtQuery{peer: worker.Peer(),
+		BlkManagerQuery: query.BlkManagerQuery{
+			RespChan: worker.RespChan(),
+			Job:      job,
+		},
 	}:
 	case <-c.blockMgr.quit:
 		return
@@ -1182,11 +1198,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// dynamically.
 	headerChan := make(chan *wire.MsgCFHeaders, len(queryMsgs))
 	q := checkpointedCFHeadersQuery{
-		blockMgr:    b,
-		msgs:        queryMsgs,
-		checkpoints: checkpoints,
-		stopHashes:  stopHashes,
-		headerChan:  headerChan,
+		blockMgr:       b,
+		msgs:           queryMsgs,
+		checkpoints:    checkpoints,
+		stopHashes:     stopHashes,
+		headerChan:     headerChan,
+		queryResponses: queryResponses,
 	}
 
 	// Hand the queries to the work manager, and consume the verified
@@ -2207,7 +2224,7 @@ func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	}
 
 	peer := msg.peer.(*ServerPeer)
-	req := msg.BlkManagerQuery.Job.ReqDetails.(*headerQuery)
+	req := msg.BlkManagerQuery.Job.JobRequest().(*headerQuery)
 	b.writeBatchMtx.RLock()
 	log.Debugf("Checking if resp to query exists (handleCheckPtQuery), peer=%v, "+
 		"start_height=%v, end_height=%v, index=%v", peer.Addr(),
@@ -2241,17 +2258,18 @@ func (b *blockManager) handleCheckPtQuery(msg *checkPtQuery,
 	b.writeBatchMtx.RUnlock()
 
 	peer.recentReqStartTime = time.Now()
-	err := peer.PushGetHeadersMsg(req.Locator, req.StopHash)
+	message := req.Message.(*wire.MsgGetHeaders)
+	err := peer.PushGetHeadersMsg(message.BlockLocatorHashes, &message.HashStop)
 	if err != nil {
 		log.Warnf("Error pushing headers: %v", err)
-		workMgrResult := &query.BlkHdrJobResult{
+		workMgrResult := &query.JobResult{
 			Job:  msg.BlkManagerQuery.Job,
 			Peer: peer,
 		}
 		workMgrResult.Err = errors.New("unable to push getheaders message")
 
 		log.Debugf("Sending result from handleCheckPtQuery fxn, most likely error with pushing")
-		query.SendResultToWorkMgr(msg.BlkManagerQuery.Results,
+		query.SendResultToWorkMgr(b.cfg.QueryDispatcher.ResultChan(),
 			workMgrResult, b.quit)
 		return
 	}
@@ -2283,14 +2301,14 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 		log.Debugf("No Header query for peer=%v", msg.Peer.Addr())
 		return
 	}
-	req := BlkManagerQuery.Job.ReqDetails.(*headerQuery)
+	req := BlkManagerQuery.Job.JobRequest().(*headerQuery)
 	log.Debugf("Received header for , start_height=%v, peer %v, end_height=%v",
 		req.startHeight, msg.Peer.Addr(), req.endHeight)
 
 	select {
 	case BlkManagerQuery.RespChan <- struct{}{}:
 		log.Debugf("Peer=%v, start_height=%v, "+
-			"end_height=%v sent message to worker", msg.Peer.Addr(),
+			"end_height=%v sent reqMessage to worker", msg.Peer.Addr(),
 			req.startHeight, req.endHeight)
 
 	case <-msg.Peer.OnDisconnect():
@@ -2327,7 +2345,7 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 	}
 	b.writeBatchMtx.Unlock()
 
-	workMgrResult := &query.BlkHdrJobResult{
+	workMgrResult := &query.JobResult{
 		Job:  BlkManagerQuery.Job,
 		Peer: msg.Peer,
 	}
@@ -2335,20 +2353,23 @@ func (b *blockManager) handleCheckPtHeaders(queryMap map[string]query.BlkManager
 	log.Debugf("Check if to create new job (handlecheckptHEADERS), peer=%v, "+
 		"start_height=%v, end_height=%v, index=%v", msg.Peer.Addr(),
 		req.startHeight, req.endHeight, BlkManagerQuery.Job.Index())
-	if msg.Headers.Headers[HdrLength-1].BlockHash() != *req.StopHash {
+	reqMessage := req.Message.(*wire.MsgGetHeaders)
+	if msg.Headers.Headers[HdrLength-1].BlockHash() != reqMessage.HashStop {
 
 		newStartHeight := req.startHeight + int32(HdrLength)
 		newStartHash := msg.Headers.Headers[HdrLength-1].BlockHash()
 
-		//Incase there is a rollback after handling message
+		//Incase there is a rollback after handling reqMessage
 		// This ensures the job created by writecheckpt does not exceed that which we have fetched already.
 		_, ok = b.hdrTipToResponse[newStartHeight]
 		if ok {
 			return
 		}
-		workMgrResult.Job.ReqDetails = &headerQuery{
-			Locator:       []*chainhash.Hash{&newStartHash},
-			StopHash:      req.StopHash,
+		workMgrResult.Job.Request.Req = &headerQuery{
+			Message: &wire.MsgGetHeaders{
+				BlockLocatorHashes: []*chainhash.Hash{&newStartHash},
+				HashStop:           reqMessage.HashStop,
+			},
 			startHeight:   newStartHeight,
 			endHeight:     req.endHeight,
 			startHash:     newStartHash,
@@ -2384,7 +2405,7 @@ func (b *blockManager) writeCheckptHeaders() {
 		if !ok {
 			continue
 		}
-		req := respDetails.Query.Job.ReqDetails.(*headerQuery)
+		req := respDetails.Query.Job.JobRequest().(*headerQuery)
 		log.Debugf("Gotten tip"+
 			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.startHeight, respDetails.response.Peer.Addr(),
 			respDetails.Query.Job.Index())
@@ -2404,7 +2425,7 @@ func (b *blockManager) writeCheckptHeaders() {
 		b.handleHeadersMsg(respDetails.response)
 		b.resetHeaderListToChainTip()
 		log.Debugf("New headertip %v", b.headerTip)
-		workMgrResult := &query.BlkHdrJobResult{
+		workMgrResult := &query.JobResult{
 			Job:  respDetails.Query.Job,
 			Peer: respDetails.response.Peer,
 		}
@@ -2419,14 +2440,25 @@ func (b *blockManager) writeCheckptHeaders() {
 				startHash:     b.headerTipHash,
 				initialHeight: req.startHeight,
 			}
+			workMgrResult.Job.Request.Req = &headerQuery{
+				Message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{&newStartHash},
+					HashStop:           reqMessage.HashStop,
+				},
+				startHeight:   newStartHeight,
+				endHeight:     req.endHeight,
+				startHash:     newStartHash,
+				initialHeight: req.startHeight,
+			}
 
 			log.Debugf("Created new job from writecheckpt loop"+
 				"start_height=%v, end_height=%v", req.startHeight, req.endHeight)
 
+			log.Debugf("Sending result from writecheckpt loop")
+			query.SendResultToWorkMgr(respDetails.Query.Results,
+				workMgrResult, b.quit)
 		}
-		log.Debugf("Sending result from writecheckpt loop")
-		query.SendResultToWorkMgr(respDetails.Query.Results,
-			workMgrResult, b.quit)
+
 	}
 	log.Debugf("End of for loop in writecheckpt loop")
 }

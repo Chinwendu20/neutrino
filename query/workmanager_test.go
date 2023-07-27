@@ -10,17 +10,17 @@ package query
 //
 //type mockWorker struct {
 //	peer    Peer
-//	nextJob chan *queryJob
-//	results chan *jobResult
+//	nextJob chan *QueryJob
+//	results chan *JobResult
 //}
 //
 //var _ Worker = (*mockWorker)(nil)
 //
-//func (m *mockWorker) NewJob() chan<- *queryJob {
+//func (m *mockWorker) NewJob() chan<- *QueryJob {
 //	return m.nextJob
 //}
 //
-//func (m *mockWorker) Run(results chan<- *jobResult,
+//func (m *mockWorker) Run(results chan<- *JobResult,
 //	quit <-chan struct{}) {
 //
 //	// We'll forward the mocked responses on the result channel.
@@ -79,8 +79,8 @@ package query
 //		NewWorker: func(peer Peer) Worker {
 //			m := &mockWorker{
 //				peer:    peer,
-//				nextJob: make(chan *queryJob),
-//				results: make(chan *jobResult),
+//				nextJob: make(chan *QueryJob),
+//				results: make(chan *JobResult),
 //			}
 //			workerChan <- m
 //			return m
@@ -141,7 +141,7 @@ package query
 //	// Each query should be sent on the nextJob queue, in the order they
 //	// had in their batch.
 //	for i := uint64(0); i < numQueries; i++ {
-//		var job *queryJob
+//		var job *QueryJob
 //		select {
 //		case job = <-wk.nextJob:
 //			if job.index != i {
@@ -155,7 +155,7 @@ package query
 //
 //		// Respond with a success result.
 //		select {
-//		case wk.results <- &jobResult{
+//		case wk.results <- &JobResult{
 //			job: job,
 //			err: nil,
 //		}:
@@ -191,7 +191,7 @@ package query
 //	// assigned the job.
 //	type sched struct {
 //		wk  *mockWorker
-//		job *queryJob
+//		job *QueryJob
 //	}
 //
 //	// Schedule a batch of queries.
@@ -248,7 +248,7 @@ package query
 //		}
 //
 //		select {
-//		case jobs[i].wk.results <- &jobResult{
+//		case jobs[i].wk.results <- &JobResult{
 //			job: jobs[i].job,
 //			err: err,
 //		}:
@@ -274,7 +274,7 @@ package query
 //			t.Fatalf("next job not received")
 //		}
 //		select {
-//		case s.wk.results <- &jobResult{
+//		case s.wk.results <- &JobResult{
 //			job: s.job,
 //			err: nil,
 //		}:
@@ -318,7 +318,7 @@ package query
 //
 //	// Respond with a result to half of the queries.
 //	for i := 0; i < numQueries/2; i++ {
-//		var job *queryJob
+//		var job *QueryJob
 //		select {
 //		case job = <-wk.nextJob:
 //		case <-errChan:
@@ -329,7 +329,7 @@ package query
 //
 //		// Respond with a success result.
 //		select {
-//		case wk.results <- &jobResult{
+//		case wk.results <- &JobResult{
 //			job: job,
 //			err: nil,
 //		}:
@@ -345,7 +345,7 @@ package query
 //
 //	// All remaining queries should be canceled.
 //	for i := 0; i < numQueries/2; i++ {
-//		var job *queryJob
+//		var job *QueryJob
 //		select {
 //		case job = <-wk.nextJob:
 //		case <-time.After(time.Second):
@@ -359,7 +359,7 @@ package query
 //		}
 //
 //		select {
-//		case wk.results <- &jobResult{
+//		case wk.results <- &JobResult{
 //			job: job,
 //			err: ErrJobCanceled,
 //		}:
@@ -403,7 +403,7 @@ package query
 //	errChan := wm.Query(queries)
 //
 //	// The 4 first workers should get the job.
-//	var jobs []*queryJob
+//	var jobs []*QueryJob
 //	for i := 0; i < numQueries; i++ {
 //		select {
 //		case job := <-workers[i].nextJob:
@@ -441,7 +441,7 @@ package query
 //	// Go backwards, and succeed the queries.
 //	for i := numQueries - 1; i >= 0; i-- {
 //		select {
-//		case workers[i].results <- &jobResult{
+//		case workers[i].results <- &JobResult{
 //			job: jobs[i],
 //			err: nil,
 //		}:

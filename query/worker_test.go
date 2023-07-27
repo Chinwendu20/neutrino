@@ -52,7 +52,7 @@ func (m *mockPeer) Addr() string {
 // makeJob returns a new query job that will be done when it is given the
 // finalResp message. Similarly ot will progress on being given the
 // progressResp message, while any other message will be ignored.
-func makeJob() *queryJob {
+func makeJob() *QueryJob {
 	q := &Request{
 		Req: req,
 		HandleResp: func(req, resp wire.Message, _ string) Progress {
@@ -76,7 +76,7 @@ func makeJob() *queryJob {
 			}
 		},
 	}
-	return &queryJob{
+	return &QueryJob{
 		index:      123,
 		timeout:    30 * time.Second,
 		encoding:   defaultQueryEncoding,
@@ -86,8 +86,8 @@ func makeJob() *queryJob {
 }
 
 type testCtx struct {
-	nextJob    chan<- *queryJob
-	jobResults chan *jobResult
+	nextJob    chan<- *QueryJob
+	jobResults chan *JobResult
 	peer       *mockPeer
 	workerDone chan struct{}
 }
@@ -101,7 +101,7 @@ func startWorker() (*testCtx, error) {
 		subscriptions: make(chan chan wire.Message),
 		quit:          make(chan struct{}),
 	}
-	results := make(chan *jobResult)
+	results := make(chan *JobResult)
 	quit := make(chan struct{})
 
 	wk := NewWorker(peer)
@@ -174,26 +174,26 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	}
 
 	// The worker should respond with a job finished.
-	var result *jobResult
+	var result *JobResult
 	select {
 	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
 
-	if result.err != nil {
-		t.Fatalf("response error: %v", result.err)
+	if result.Err != nil {
+		t.Fatalf("response error: %v", result.Err)
 	}
 
 	// Make sure the result was given for the intended job.
-	if result.job != task {
+	if result.Job != task {
 		t.Fatalf("got result for unexpected job")
 	}
 
 	// And the correct peer.
-	if result.peer != ctx.peer {
+	if result.Peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			ctx.peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.Peer)
 	}
 }
 
@@ -229,26 +229,26 @@ func TestWorkerTimeout(t *testing.T) {
 
 	// Don't anwer the query. This should trigger a timeout, and the worker
 	// should respond with an error result.
-	var result *jobResult
+	var result *JobResult
 	select {
 	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
 
-	if result.err != ErrQueryTimeout {
-		t.Fatalf("expected timeout, got: %v", result.err)
+	if result.Err != ErrQueryTimeout {
+		t.Fatalf("expected timeout, got: %v", result.Err)
 	}
 
 	// Make sure the result was given for the intended job.
-	if result.job != task {
+	if result.Job != task {
 		t.Fatalf("got result for unexpected job")
 	}
 
 	// And the correct peer.
-	if result.peer != ctx.peer {
+	if result.Peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			ctx.peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.Peer)
 	}
 
 	// It will immediately attempt to fetch another task.
@@ -288,26 +288,26 @@ func TestWorkerDisconnect(t *testing.T) {
 	close(ctx.peer.quit)
 
 	// The worker should respond with a job failure.
-	var result *jobResult
+	var result *JobResult
 	select {
 	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
 
-	if result.err != ErrPeerDisconnected {
-		t.Fatalf("expected peer disconnect, got: %v", result.err)
+	if result.Err != ErrPeerDisconnected {
+		t.Fatalf("expected peer disconnect, got: %v", result.Err)
 	}
 
 	// Make sure the result was given for the intended job.
-	if result.job != task {
+	if result.Job != task {
 		t.Fatalf("got result for unexpected job")
 	}
 
 	// And the correct peer.
-	if result.peer != ctx.peer {
+	if result.Peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			ctx.peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.Peer)
 	}
 
 	// No more jobs should be accepted by the worker after it has exited.
@@ -376,26 +376,26 @@ func TestWorkerProgress(t *testing.T) {
 	}
 
 	// The worker should respond with a job finised.
-	var result *jobResult
+	var result *JobResult
 	select {
 	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
 
-	if result.err != nil {
-		t.Fatalf("expected no error, got: %v", result.err)
+	if result.Err != nil {
+		t.Fatalf("expected no error, got: %v", result.Err)
 	}
 
 	// Make sure the result was given for the intended task.
-	if result.job != task {
+	if result.Job != task {
 		t.Fatalf("got result for unexpected job")
 	}
 
 	// And the correct peer.
-	if result.peer != ctx.peer {
+	if result.Peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			ctx.peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.Peer)
 	}
 }
 
@@ -449,26 +449,26 @@ func TestWorkerJobCanceled(t *testing.T) {
 		}
 
 		// The worker should respond with a job failure.
-		var result *jobResult
+		var result *JobResult
 		select {
 		case result = <-ctx.jobResults:
 		case <-time.After(time.Second):
 			t.Fatalf("response not received")
 		}
 
-		if result.err != ErrJobCanceled {
-			t.Fatalf("expected job canceled, got: %v", result.err)
+		if result.Err != ErrJobCanceled {
+			t.Fatalf("expected job canceled, got: %v", result.Err)
 		}
 
 		// Make sure the result was given for the intended task.
-		if result.job != task {
+		if result.Job != task {
 			t.Fatalf("got result for unexpected job")
 		}
 
 		// And the correct peer.
-		if result.peer != ctx.peer {
+		if result.Peer != ctx.peer {
 			t.Fatalf("expected peer to be %v, was %v",
-				ctx.peer.Addr(), result.peer)
+				ctx.peer.Addr(), result.Peer)
 		}
 	}
 }

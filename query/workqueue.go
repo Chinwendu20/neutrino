@@ -1,10 +1,16 @@
 package query
 
+import "github.com/btcsuite/btcd/wire"
+
 // Task is an interface that has a method for returning their index in the
 // work queue.
 type Task interface {
 	// Index returns this Task's index in the work queue.
-	Index() uint64
+	Index() float64
+
+	Encoding() wire.MessageEncoding
+
+	JobRequest() wire.Message
 }
 
 // workQueue is struct implementing the heap interface, and is used to keep a
