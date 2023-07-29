@@ -881,6 +881,7 @@ func (c *checkpointedCFHeadersQuery) sendQuery(worker query.Worker,
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	peerAddr string) query.Progress {
+	log.Debugf("Inside  cfworkmanager handle response for %v ", peerAddr)
 
 	peer := c.blockMgr.cfg.peerByAddr(peerAddr)
 	r, ok := resp.(*wire.MsgCFHeaders)
@@ -910,7 +911,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 			Progressed: false,
 		}
 	}
-
+	log.Debugf("Updating duration cfmgr")
 	peer.UpdateRequestDuration()
 	_, ok = c.queryResponses[checkPointIndex]
 	if ok {
@@ -980,7 +981,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 			Progressed: false,
 		}
 	}
-
+	log.Debugf("Successfully cfworkmanager handle response for %v ", peerAddr)
 	return query.Progress{
 		Finished:   true,
 		Progressed: true,
@@ -1052,7 +1053,7 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
 			Progressed: false,
 		}
 	}
-
+	log.Debugf("Updating duration blkmgr")
 	peer.UpdateRequestDuration()
 
 	c.blockMgr.writeBatchMtx.RLock()

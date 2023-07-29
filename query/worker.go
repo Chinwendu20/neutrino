@@ -215,7 +215,7 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 						// timeout value.
 						if progress.Progressed {
 							jobUnfinished = true
-							job.JobIndex = job.JobIndex + 0.00005
+							job.JobIndex = job.JobIndex
 
 							break feedbackLoop
 						}
@@ -284,11 +284,14 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 		log.Debugf("Is job unfinished, %v from %v, index=%v for %v", jobUnfinished, peer.Addr(), job.JobIndex, w.temp)
 
 		if jobErr == ErrQueryTimeout {
+			log.Debugf("going back to feedback loop after timeout %v %v %v", peer.Addr(), job.JobIndex, w.temp)
+			jobErr = nil
 			goto feedbackLoop
 		}
 
 		// If the peer disconnected, we can exit immediately.
 		if jobErr == ErrPeerDisconnected {
+			log.Debugf("return after peeer disconnected %v %v %v", peer.Addr(), job.JobIndex, w.temp)
 			return
 		}
 	}

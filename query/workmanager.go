@@ -202,7 +202,6 @@ func (w *WorkManager) workDispatcher() {
 	queryIndex := float64(0)
 	currentQueries := make(map[float64]uint64)
 
-Loop:
 	for {
 		// Otherwise the work queue is empty, or there are no workers
 		// to distribute work to, so we'll just wait for a result of a
@@ -249,8 +248,9 @@ Loop:
 			w.workersRWMutex.RLock()
 			r := w.workers[result.Peer.Addr()]
 			w.workersRWMutex.RUnlock()
-			r.activeJob = nil
-
+			if result.Err != ErrQueryTimeout {
+				r.activeJob = nil
+			}
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have
 			// to track it anymore. We'll add it back if the result
@@ -273,15 +273,25 @@ Loop:
 				// was canceled, forward the error on the
 				// batch's error channel.  We do this since a
 				// cancellation applies to the whole batch.
-				if batch != nil {
-					batch.errChan <- result.Err
-					delete(currentBatches, batchNum)
-
-					log.Debugf("Canceled batch %v",
-						batchNum)
-					continue Loop
-				}
-
+				//TODO(Maureen): Place holder code
+				//if batch != nil {
+				//	batch.errChan <- result.Err
+				//	delete(currentBatches, batchNum)
+				//
+				//	log.Debugf("Canceled batch %v",
+				//		batchNum)
+				//	continue Loop
+				//}
+				log.Warnf("Query(%d) from peer %v cancelled, "+
+					"rescheduling: %v", result.Job.Index(),
+					result.Peer.Addr(), result.Err)
+				w.workRWMtx.Lock()
+				log.Warnf("Query(%d) locking job: %v", result.Job.Index(),
+					result.Peer.Addr(), result.Err)
+				heap.Push(w.work, result.Job)
+				w.workRWMtx.Unlock()
+				log.Warnf("Query(%d) Out of locking job: %v", result.Job.Index(),
+					result.Peer.Addr(), result.Err)
 			// If the query ended with any other error, put it back
 			// into the work queue.
 			case result.Err != nil:
@@ -300,21 +310,22 @@ Loop:
 			default:
 
 				if result.UnFinished {
-					log.Debugf("Job %v is unfinished", result.Job.Index())
+					result.Job.JobIndex = result.Job.Index() + 0.0005
+					log.Debugf("Job %v is unfinished, creating new index", result.Job.Index())
 					log.Debugf("Length of testWork before push %v", w.work.Len())
 					w.workRWMtx.Lock()
 					heap.Push(w.work, &result.Job)
 					batch.rem++
 					log.Debugf("Length of testWork after push %v", w.work.Len())
-					temp := w.work.Peek().(*QueryJob)
+					tem := w.work.Peek().(*QueryJob)
 					w.workRWMtx.Unlock()
-					log.Debugf("First element in the heap: %v", temp.Index())
+					log.Debugf("First element in the heap: %v", tem.Index())
 					currentQueries[result.Job.Index()] = batchNum
 
 					continue
-				} else {
-					log.Debugf("Job %v is Finished", result.Job.Index())
 				}
+				log.Debugf("Job %v is Finished", result.Job.Index())
+
 				// Decrement the number of queries remaining in
 				// the batch.
 				if batch != nil {
@@ -466,6 +477,7 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 						w.workersRWMutex.Lock()
 						delete(w.workers, p.Addr())
 						w.workersRWMutex.Unlock()
+						log.Debugf("Worker %v has exited %v", r.w.Peer().Addr(), temp)
 
 						continue
 
