@@ -560,20 +560,23 @@ func (sp *ServerPeer) PeerTimeout() time.Duration {
 	return sp.reqTimeout
 }
 
-func (sp *ServerPeer) IsPeerBehindStartHeight(req interface{}) bool {
+func (sp *ServerPeer) IsPeerBehindStartHeight(req wire.Message) bool {
+	log.Debugf("Sp is nil", sp == nil)
 	queryGetHeaders, ok := req.(*headerQuery)
+
 	if !ok {
-		log.Tracef("request is not type headerQuery")
+		log.Debugf("request is not type headerQuery")
 
 		return true
 	}
+
 	if sp.LastBlock() < queryGetHeaders.startHeight {
 
-		return false
+		return true
 
 	}
 
-	return true
+	return false
 
 }
 
@@ -788,14 +791,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
 	s.cfHdrWorkManager = query.New(&query.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
-		Ranking:        query.NewPeerRanking(),
+		ConnectedPeers:       s.ConnectedPeers,
+		NewWorker:            query.NewWorker,
+		Ranking:              query.NewPeerRanking(),
+		IsEligibleWorkerFunc: query.IsWorkerEligibleForCFHdrFetch,
+
+		Temp: "cfhdrWorkmanager",
 	})
 	s.blkHdrWorkManager = query.New(&query.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
-		Ranking:        query.NewPeerRanking(),
+		ConnectedPeers:       s.ConnectedPeers,
+		NewWorker:            query.NewWorker,
+		Ranking:              query.NewPeerRanking(),
+		IsEligibleWorkerFunc: query.IsWorkerEligibleForBlkHdrFetch,
+
+		Temp: "blkhdrWorkmanager",
 	})
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
@@ -857,6 +866,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		GetBlock:              s.GetBlock,
 		firstPeerSignal:       s.firstPeerConnect,
 		queryAllPeers:         s.queryAllPeers,
+		peerByAddr:            s.PeerByAddr,
 	})
 	if err != nil {
 		return nil, err
@@ -1658,6 +1668,9 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
+	if err := s.blkHdrWorkManager.Start(); err != nil {
+		return fmt.Errorf("unable to start work manager: %v", err)
+	}
 	if err := s.cfHdrWorkManager.Start(); err != nil {
 		return fmt.Errorf("unable to start work manager: %v", err)
 	}

@@ -80,11 +80,13 @@ type Config struct {
 
 	// NewWorker is function closure that should start a new worker. We
 	// make this configurable to easily mock the worker used during tests.
-	NewWorker func(BlkHdrPeer) Worker
+	NewWorker func(BlkHdrPeer, string) Worker
 
 	// Ranking is used to rank the connected peers when determining who to
 	// give work to.
-	Ranking PeerRanking
+	Ranking              PeerRanking
+	IsEligibleWorkerFunc func(r *activeWorker, next *QueryJob) bool
+	Temp                 string
 }
 
 // WorkManager is the main access point for outside callers, and satisfies the
@@ -107,7 +109,7 @@ type WorkManager struct {
 	wg   sync.WaitGroup
 
 	workersRWMutex sync.RWMutex
-	workRWMtx      sync.Mutex
+	workRWMtx      sync.RWMutex
 
 	workers map[string]*activeWorker
 	work    *workQueue
@@ -121,6 +123,7 @@ func New(cfg *Config) *WorkManager {
 	return &WorkManager{
 		cfg:        cfg,
 		newBatches: make(chan *batch),
+		// TODO: Return jobResults to previous cap
 		jobResults: make(chan *JobResult, 2),
 		quit:       make(chan struct{}),
 		workers:    make(map[string]*activeWorker),
@@ -133,12 +136,13 @@ func (w *WorkManager) Start() error {
 	// Init a work queue which will be used to sort the incoming queries in
 	// a first come first served fashion. We use a heap structure such
 	// that we can efficiently put failed queries back in the queue.
-
+	temp := w.cfg.Temp
+	log.Debugf("starting wormanager for %s", temp)
 	heap.Init(w.work)
 
 	w.wg.Add(2)
 	go w.workDispatcher()
-	go w.distributeBlkHeaderWork()
+	go w.distributeWorkFunc(w.cfg.IsEligibleWorkerFunc)()
 
 	return nil
 }
@@ -158,6 +162,8 @@ func (w *WorkManager) Stop() error {
 //
 // NOTE: MUST be run as a goroutine.
 func (w *WorkManager) workDispatcher() {
+	temp := w.cfg.Temp
+	log.Debugf("Inside work dispatcher for %s", temp)
 	defer w.wg.Done()
 
 	// Get a peer subscription. We do it in this goroutine rather than
@@ -207,10 +213,10 @@ Loop:
 		// connects.
 		case connectPeer := <-peersConnected:
 			peer := connectPeer.(BlkHdrPeer)
-			log.Debugf("Starting worker for peer %v",
+			log.Debugf("(%) Starting worker for peer %v", temp,
 				peer.Addr())
 
-			r := w.cfg.NewWorker(peer)
+			r := w.cfg.NewWorker(peer, temp)
 
 			// We'll create a channel that will close after the
 			// worker's Run method returns, to know when we can
@@ -234,7 +240,7 @@ Loop:
 
 		// A new result came back.
 		case result := <-w.jobResults:
-			log.Tracef("Result for job %v received from peer %v "+
+			log.Debugf("Result for job %v received from peer %v "+
 				"(err=%v)", result.Job.Index(),
 				result.Peer.Addr(), result.Err)
 
@@ -354,10 +360,11 @@ Loop:
 			// Add all new queries in the batch to our work queue,
 			// with priority given by the order they were
 			// scheduled.
-			log.Debugf("Adding new batch(%d) of %d queries to "+
-				"work queue", batchIndex, len(batch.requests))
+			log.Debugf("(%s)Adding new batch(%d) of %d queries to "+
+				"work queue", temp, batchIndex, len(batch.requests))
 
 			for _, q := range batch.requests {
+
 				w.workRWMtx.Lock()
 				heap.Push(w.work, &QueryJob{
 					JobIndex:   queryIndex,
@@ -367,6 +374,7 @@ Loop:
 					Request:    q,
 				})
 				w.workRWMtx.Unlock()
+
 				currentQueries[queryIndex] = batchIndex
 				queryIndex++
 			}
@@ -386,9 +394,11 @@ Loop:
 // distributeBlkHeaderWork distributes getheader work gotten from the
 // blkHeaderDispatcher
 
-func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, *QueryJob) bool) func(w *WorkManager) {
+func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, *QueryJob) bool) func() {
 
-	return func(w *WorkManager) {
+	return func() {
+		temp := w.cfg.Temp
+		log.Debugf("starting distrubute work for %s", temp)
 		defer w.wg.Done()
 
 	Loop:
@@ -396,9 +406,11 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 
 			// If the work queue is non-empty, we'll take out the first
 			// element in order to distribute it to a worker.
+			w.workRWMtx.RLock()
 			w.workersRWMutex.RLock()
 			if w.work.Len() > 0 && len(w.workers) > 0 {
 				w.workersRWMutex.RUnlock()
+				w.workRWMtx.RUnlock()
 
 				w.workRWMtx.Lock()
 				next := w.work.Peek().(*QueryJob)
@@ -410,11 +422,11 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 					w.workersRWMutex.RUnlock()
 
 					if !eligibleWorkerFunc(r, next) {
-						w.workersRWMutex.Lock()
+						w.workersRWMutex.RLock()
 						continue
 					}
 
-					log.Debugf("Num eligible worker: %v", len(eligibleWorkers))
+					log.Debugf("Num eligible worker: %v, for %v", len(eligibleWorkers), temp)
 					eligibleWorkers = append(eligibleWorkers, r.w.Peer())
 					w.workersRWMutex.RLock()
 				}
@@ -433,11 +445,11 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 
 					// The worker has free work slots, it should
 					// pick up the query.
-					log.Debugf("Giving Next job to peer: %v", r.w.Peer())
+					log.Debugf("Giving Next job to peer: %v for %v", r.w.Peer(), temp)
 					select {
 					case r.w.NewJob() <- next:
-						log.Debugf("Sent job %v to worker %v",
-							next.Index(), p)
+						log.Debugf("Sent job %v to worker %v, for %v",
+							next.Index(), p, temp)
 
 						heap.Pop(w.work)
 						w.workRWMtx.Unlock()
@@ -454,6 +466,7 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 						w.workersRWMutex.Lock()
 						delete(w.workers, p.Addr())
 						w.workersRWMutex.Unlock()
+
 						continue
 
 					case <-w.quit:
@@ -465,19 +478,26 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 				w.workRWMtx.Unlock()
 			} else {
 				w.workersRWMutex.RUnlock()
+				w.workRWMtx.RUnlock()
 			}
 
 		}
 	}
 }
 
-func (w *WorkManager) isWorkerEligibleForBlkHdrFetch(r *activeWorker, next *QueryJob) bool {
+func IsWorkerEligibleForBlkHdrFetch(r *activeWorker, next *QueryJob) bool {
 	// Only one active job at a time is currently
 	// supported.
+
 	if r.activeJob != nil {
 		return false
 	}
-	if !r.w.Peer().IsPeerBehindStartHeight(next.Request) {
+
+	if !r.w.Peer().IsSyncCandidate() {
+		return false
+	}
+
+	if r.w.Peer().IsPeerBehindStartHeight(next.Req) {
 		return false
 
 	}
@@ -486,9 +506,10 @@ func (w *WorkManager) isWorkerEligibleForBlkHdrFetch(r *activeWorker, next *Quer
 
 }
 
-func (w *WorkManager) isWorkerEligibleForCFHdrFetch(r *activeWorker, _ *QueryJob) bool {
+func IsWorkerEligibleForCFHdrFetch(r *activeWorker, _ *QueryJob) bool {
 	// Only one active job at a time is currently
 	// supported.
+	log.Debugf("In eligibility function for cfhdr")
 	if r.activeJob != nil {
 		return false
 	}
@@ -502,7 +523,13 @@ func (w *WorkManager) isWorkerEligibleForCFHdrFetch(r *activeWorker, _ *QueryJob
 // NOTO: Part of the Dispatcher interface.
 func (w *WorkManager) Query(requests []*Request,
 	options ...QueryOption) chan error {
-
+	var req string
+	if requests[0].HandleResp == nil {
+		req = "blk headers"
+		log.Debugf("sending query to work manager for %s", req)
+	} else {
+		log.Debugf("sending query to work manager for , %s", req)
+	}
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
 
@@ -515,10 +542,11 @@ func (w *WorkManager) Query(requests []*Request,
 	// Add query messages to the queue of batches to handle.
 	select {
 	case w.newBatches <- newBatch:
+		log.Debugf("New batch sent for , %s", req)
 	case <-w.quit:
 		errChan <- ErrWorkManagerShuttingDown
 	}
-
+	log.Debugf("Out of sending query for %s", req)
 	return newBatch.options.errChan
 }
 

@@ -70,22 +70,24 @@ type worker struct {
 	nextJob chan *QueryJob
 
 	respChan chan interface{}
+	temp     string
 }
 
 // A compile-time check to ensure worker satisfies the Worker interface.
 var _ Worker = (*worker)(nil)
 
 // NewWorker creates a new worker associated with the given peer.
-func NewWorker(peer BlkHdrPeer) Worker {
+func NewWorker(peer BlkHdrPeer, work string) Worker {
 	return &worker{
 		peer:    peer,
 		nextJob: make(chan *QueryJob),
+		temp:    work,
 	}
 }
 
 func (w *worker) Peer() BlkHdrPeer {
 
-	return nil
+	return w.peer
 }
 
 // NewJob returns a channel where work that is to be handled by the worker can
@@ -119,26 +121,26 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 	defer cancel()
 
 	for {
-		log.Tracef("Worker %v waiting for more work", peer.Addr())
+		log.Debugf("Worker %v waiting for more work for %v", peer.Addr(), w.temp)
 
 		var job *QueryJob
 		select {
 		// Poll a new job from the nextJob channel.
 		case job = <-w.nextJob:
-			log.Tracef("Worker %v picked up job with index %v",
-				peer.Addr(), job.Index())
+			log.Tracef("Worker %v picked up job with index %v for %v",
+				peer.Addr(), job.Index(), w.temp)
 
 		// Ignore any message received while not working on anything.
-		case msg := <-w.respChan:
+		case msg := <-msgChan:
 			log.Tracef("Worker %v ignoring received msg %T "+
-				"since no job active", peer.Addr(), msg)
+				"since no job active for %v", peer.Addr(), msg, w.temp)
 			continue
 
 		// If the peer disconnected, we can exit immediately, as we
 		// weren't working on a query.
 		case <-peer.OnDisconnect():
-			log.Debugf("Peer %v for worker disconnected",
-				peer.Addr())
+			log.Debugf("Peer %v for worker disconnected for %v",
+				peer.Addr(), w.temp)
 			return
 
 		case <-quit:
@@ -146,8 +148,9 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 		}
 
 		var (
-			jobErr  error
-			timeout *time.Timer
+			jobErr        error
+			timeout       *time.Timer
+			jobUnfinished bool
 		)
 
 		select {
@@ -155,7 +158,7 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 		// is canceled, so we check this quickly.
 		case <-job.cancelChan:
 			log.Tracef("Worker %v found job with index %v "+
-				"already canceled", peer.Addr(), job.Index())
+				"already canceled for %v", peer.Addr(), job.Index(), w.temp)
 
 			// We break to the below loop, where we'll check the
 			// cancel channel again and the ErrJobCanceled
@@ -164,8 +167,8 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 
 		// We received a non-canceled query job, send it to the peer.
 		default:
-			log.Tracef("Worker %v queuing job %T with index %v",
-				peer.Addr(), job.Req, job.Index())
+			log.Debugf("Worker %v queuing job %T with index %v for %v",
+				peer.Addr(), job.Req, job.Index(), w.temp)
 
 			job.SendQuery(w, job)
 			queryTimeout := peer.PeerTimeout()
@@ -174,6 +177,7 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 
 				queryTimeout = peer.LastReqDuration()
 			}
+			log.Debugf("Timeout for job is %v for %v", queryTimeout, w.temp)
 			timeout = time.NewTimer(queryTimeout)
 
 		}
@@ -188,15 +192,16 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 			// our request.
 			case resp := <-msgChan:
 				if job.HandleResp != nil {
+
 					progress := job.HandleResp(
-						job.Req, resp, peer,
+						job.Req, resp, peer.Addr(),
 					)
 
-					log.Tracef("Worker %v handled msg %T while "+
+					log.Debugf("Worker %v handled msg %T while "+
 						"waiting for response to %T (job=%v). "+
-						"Finished=%v, progressed=%v",
+						"Finished=%v, progressed=%v, for %v",
 						peer.Addr(), resp, job.Req, job.Index(),
-						progress.Finished, progress.Progressed)
+						progress.Finished, progress.Progressed, w.temp)
 
 					// If the response did not answer our query, we
 					// check whether it did progress it.
@@ -209,10 +214,10 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 						// TODO(halseth): separate progress
 						// timeout value.
 						if progress.Progressed {
-							timeout.Stop()
-							timeout = time.NewTimer(
-								job.timeout,
-							)
+							jobUnfinished = true
+							job.JobIndex = job.JobIndex + 0.00005
+
+							break feedbackLoop
 						}
 						continue feedbackLoop
 					}
@@ -228,9 +233,9 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 				// The query did experience a timeout and will
 				// be given to someone else.
 				jobErr = ErrQueryTimeout
-				log.Tracef("Worker %v timeout for request %T "+
-					"with job index %v", peer.Addr(),
-					job.Req, job.Index())
+				log.Debugf("Worker %v timeout for request %T "+
+					"with job index %v for %v", peer.Addr(),
+					job.Req, job.Index(), w.temp)
 
 				break feedbackLoop
 
@@ -238,8 +243,8 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 			// answer, we'll also exit with an error.
 			case <-peer.OnDisconnect():
 				log.Debugf("Peer %v for worker disconnected, "+
-					"cancelling job %v", peer.Addr(),
-					job.Index())
+					"cancelling job %v, for %v", peer.Addr(),
+					job.Index(), w.temp)
 
 				if jobErr == ErrQueryTimeout {
 
@@ -253,8 +258,8 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 			// If the job was canceled, we report this back to the
 			// work manager.
 			case <-job.cancelChan:
-				log.Tracef("Worker %v job %v canceled",
-					peer.Addr(), job.Index())
+				log.Tracef("Worker %v job %v canceled for %v",
+					peer.Addr(), job.Index(), w.temp)
 
 				jobErr = ErrJobCanceled
 				break feedbackLoop
@@ -269,15 +274,14 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 
 		// We have a result ready for the query, hand it off before
 		// getting a new job.
-		select {
-		case results <- &JobResult{
-			Job:  job,
-			Peer: peer,
-			Err:  jobErr,
-		}:
-		case <-quit:
-			return
-		}
+		SendResultToWorkMgr(results, &JobResult{
+			Job:        *job,
+			Peer:       peer,
+			Err:        jobErr,
+			UnFinished: jobUnfinished,
+		}, quit)
+
+		log.Debugf("Is job unfinished, %v from %v, index=%v for %v", jobUnfinished, peer.Addr(), job.JobIndex, w.temp)
 
 		if jobErr == ErrQueryTimeout {
 			goto feedbackLoop
@@ -294,7 +298,7 @@ func (w *worker) Run(results chan<- *JobResult, quit <-chan struct{}) {
 // communication between the blockmanager and
 // the worker and workmanager
 
-// TODO(Maureen): Probably move to blockmanager
+// TODO(Maureen): Probably move to blockmanager->Remove entirely
 type BlkManagerQuery struct {
 	RespChan chan<- interface{}
 	Job      QueryJob
