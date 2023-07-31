@@ -712,8 +712,6 @@ type ChainService struct { // nolint:maligned
 
 	cfHdrWorkManager  query.WorkManager
 	blkHdrWorkManager query.WorkManager
-	//TODO(Maureen): Remove
-	workManager       query.WorkManager
 	filterBatchWriter *chanutils.BatchWriter[*filterdb.FilterData]
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
