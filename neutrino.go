@@ -293,7 +293,7 @@ func (sp *ServerPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 			log.Tracef("Ignoring tx %s in inv from %v -- "+
 				"SPV mode", invVect.Hash, sp)
 			if sp.ProtocolVersion() >= wire.BIP0037Version {
-				log.Infof("Peer %v is announcing "+
+				log.Infof("peer %v is announcing "+
 					"transactions -- disconnecting", sp)
 				sp.Disconnect()
 				return
@@ -327,7 +327,7 @@ func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 func (sp *ServerPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 	// Check that the passed minimum fee is a valid amount.
 	if msg.MinFee < 0 || msg.MinFee > btcutil.MaxSatoshi {
-		log.Debugf("Peer %v sent an invalid feefilter '%v' -- "+
+		log.Debugf("peer %v sent an invalid feefilter '%v' -- "+
 			"disconnecting", sp, btcutil.Amount(msg.MinFee))
 		sp.Disconnect()
 		return
@@ -548,20 +548,26 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	}
 }
 
+// UpdateRequestDuration updates the peer's recentReqDuration metadata to its
+// most recent one
 func (sp *ServerPeer) UpdateRequestDuration() {
 
 	duration := time.Since(sp.recentReqStartTime)
 	sp.recentReqDuration = duration
-	log.Debugf("Peer=%v, updated duration to=%v", sp.Addr(), duration.Seconds())
+	log.Debugf("peer=%v, updated duration to=%v", sp.Addr(), duration.Seconds())
 }
 
+// PeerTimeout  returns the request time out metadata for the peer
 func (sp *ServerPeer) PeerTimeout() time.Duration {
 
 	return sp.reqTimeout
 }
 
+// IsPeerBehindStartHeight returns a boolean indicating if the peer's last block height
+// is behind the start height of the request. If the peer is not behind the request start
+// height false is returned, otherwise, true is.
 func (sp *ServerPeer) IsPeerBehindStartHeight(req wire.Message) bool {
-	log.Debugf("Sp is nil", sp == nil)
+
 	queryGetHeaders, ok := req.(*headerQuery)
 
 	if !ok {
@@ -790,22 +796,26 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
-	s.cfHdrWorkManager = query.New(&query.Config{
-		ConnectedPeers:       s.ConnectedPeers,
-		NewWorker:            query.NewWorker,
-		Ranking:              query.NewPeerRanking(),
-		IsEligibleWorkerFunc: query.IsWorkerEligibleForCFHdrFetch,
 
-		Temp: "cfhdrWorkmanager",
-	})
-	s.blkHdrWorkManager = query.New(&query.Config{
-		ConnectedPeers:       s.ConnectedPeers,
-		NewWorker:            query.NewWorker,
-		Ranking:              query.NewPeerRanking(),
-		IsEligibleWorkerFunc: query.IsWorkerEligibleForBlkHdrFetch,
+	//Create queryConfig  for the two work managers
+	queryConfig := &query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Order:          query.OrderPeers,
+	}
 
-		Temp: "blkhdrWorkmanager",
-	})
+	//Update specific fields for cfHdrWorkManager and create a
+	//workManager instance with it.
+	queryConfig.IsEligibleWorkerFunc = query.IsWorkerEligibleForCFHdrFetch
+	queryConfig.Temp = "cfhdrWorkmanager"
+	s.cfHdrWorkManager = query.New(queryConfig)
+
+	//Update specific fields for blkHdrWorkManager and create a
+	//workManager instance with it.
+	queryConfig.IsEligibleWorkerFunc = query.IsWorkerEligibleForBlkHdrFetch
+	queryConfig.Temp = "blkhdrWorkmanager"
+	s.blkHdrWorkManager = query.New(queryConfig)
+
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
 	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
@@ -1156,7 +1166,7 @@ func (s *ChainService) IsBanned(addr string) bool {
 
 	// Log how much time left the peer will remain banned for, if any.
 	if time.Now().Before(banStatus.Expiration) {
-		log.Debugf("Peer %v is banned for another %v", addr,
+		log.Debugf("peer %v is banned for another %v", addr,
 			time.Until(banStatus.Expiration))
 	}
 
@@ -1270,7 +1280,7 @@ cleanup:
 		}
 	}
 	s.wg.Done()
-	log.Tracef("Peer handler done")
+	log.Tracef("peer handler done")
 }
 
 // addrStringToNetAddr takes an address in the form of 'host:port' or 'host'
@@ -1669,10 +1679,10 @@ func (s *ChainService) Start() error {
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
 	if err := s.blkHdrWorkManager.Start(); err != nil {
-		return fmt.Errorf("unable to start work manager: %v", err)
+		return fmt.Errorf("unable to start blkHdrWorkManager work manager: %v", err)
 	}
 	if err := s.cfHdrWorkManager.Start(); err != nil {
-		return fmt.Errorf("unable to start work manager: %v", err)
+		return fmt.Errorf("unable to start cfHdrWorkManager work manager: %v", err)
 	}
 
 	if err := s.utxoScanner.Start(); err != nil {
@@ -1710,7 +1720,11 @@ func (s *ChainService) Stop() error {
 		returnErr = err
 	}
 	if err := s.cfHdrWorkManager.Stop(); err != nil {
-		log.Errorf("error stopping work manager: %v", err)
+		log.Errorf("error stopping cfHdrWorkManager work manager: %v", err)
+		returnErr = err
+	}
+	if err := s.blkHdrWorkManager.Stop(); err != nil {
+		log.Errorf("error stopping blkHdrWorkManager work manager: %v", err)
 		returnErr = err
 	}
 	s.blockSubscriptionMgr.Stop()

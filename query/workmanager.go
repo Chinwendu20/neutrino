@@ -3,6 +3,7 @@ package query
 import (
 	"container/heap"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -38,7 +39,7 @@ type Worker interface {
 	//
 	// The method is blocking, and should be started in a goroutine. It
 	// will run until the peer disconnects or the worker is told to quit.
-	Run(results chan<- *JobResult, quit <-chan struct{})
+	Run(results chan<- *jobResult, quit <-chan struct{})
 
 	// NewJob returns a channel where work that is to be handled by the
 	// worker can be sent. If the worker reads a QueryJob from this
@@ -48,8 +49,6 @@ type Worker interface {
 	NewJob() chan<- *QueryJob
 
 	Peer() BlkHdrPeer
-
-	RespChan() chan<- interface{}
 }
 
 // PeerRanking is an interface that must be satisfied by the underlying module
@@ -76,15 +75,18 @@ type Config struct {
 	// will be sent imemdiately, and new peers as they connect.
 	//
 	// The returned function closure is called to cancel the subscription.
-	ConnectedPeers func() (<-chan Peer, func(), error)
+	ConnectedPeers func() (<-chan BlkHdrPeer, func(), error)
 
 	// NewWorker is function closure that should start a new worker. We
 	// make this configurable to easily mock the worker used during tests.
 	NewWorker func(BlkHdrPeer, string) Worker
 
-	// Ranking is used to rank the connected peers when determining who to
+	// Order is used to rank the connected peers when determining who to
 	// give work to.
-	Ranking              PeerRanking
+	Order func(peers []BlkHdrPeer)
+
+	// This function is used to determine peers that are eligible to be sent a job
+	// while distributing tasks in the work mananger
 	IsEligibleWorkerFunc func(r *activeWorker, next *QueryJob) bool
 	Temp                 string
 }
@@ -101,7 +103,7 @@ type WorkManager struct {
 
 	// jobResults is the common channel where results from queries from all
 	// workers will be sent.
-	jobResults chan *JobResult
+	jobResults chan *jobResult
 
 	NewWorker func(Peer) Worker
 
@@ -124,7 +126,7 @@ func New(cfg *Config) *WorkManager {
 		cfg:        cfg,
 		newBatches: make(chan *batch),
 		// TODO: Return jobResults to previous cap
-		jobResults: make(chan *JobResult, 2),
+		jobResults: make(chan *jobResult, 2),
 		quit:       make(chan struct{}),
 		workers:    make(map[string]*activeWorker),
 		work:       &workQueue{},
@@ -191,6 +193,7 @@ func (w *WorkManager) workDispatcher() {
 	// When the work dispatcher exits, we'll loop through the remaining
 	// batches and send on their error channel.
 	defer func() {
+		log.Debugf("%v Out of work dispatcher", temp)
 		for _, b := range currentBatches {
 			b.errChan <- ErrWorkManagerShuttingDown
 		}
@@ -207,11 +210,19 @@ func (w *WorkManager) workDispatcher() {
 		// to distribute work to, so we'll just wait for a result of a
 		// previous query to come back, a new peer to connect, or for a
 		// new batch of queries to be scheduled.
+		log.Debugf("%v Waiting for ", temp)
 		select {
 		// Spin up a goroutine that runs a worker each time a peer
 		// connects.
 		case connectPeer := <-peersConnected:
 			peer := connectPeer.(BlkHdrPeer)
+			w.workersRWMutex.RLock()
+			_, ok := w.workers[peer.Addr()]
+			w.workersRWMutex.RUnlock()
+			if ok {
+				log.Debugf("%v Worker with peer address already exists", temp)
+				continue
+			}
 			log.Debugf("(%) Starting worker for peer %v", temp,
 				peer.Addr())
 
@@ -220,6 +231,7 @@ func (w *WorkManager) workDispatcher() {
 			// We'll create a channel that will close after the
 			// worker's Run method returns, to know when we can
 			// remove it from our set of active workers.
+
 			onExit := make(chan struct{})
 			w.workersRWMutex.Lock()
 			w.workers[peer.Addr()] = &activeWorker{
@@ -239,35 +251,38 @@ func (w *WorkManager) workDispatcher() {
 
 		// A new result came back.
 		case result := <-w.jobResults:
-			log.Debugf("Result for job %v received from peer %v "+
-				"(err=%v)", result.Job.Index(),
-				result.Peer.Addr(), result.Err)
+			log.Debugf("%v Result for job %v received from peer %v "+
+				"(err=%v)", temp, result.job.Index(),
+				result.peer.Addr(), result.err)
 
 			// Delete the job from the worker's active job, such
 			// that the slot gets opened for more work.
 			w.workersRWMutex.RLock()
-			r := w.workers[result.Peer.Addr()]
+			r := w.workers[result.peer.Addr()]
 			w.workersRWMutex.RUnlock()
-			if result.Err != ErrQueryTimeout {
+			if result.err != ErrQueryTimeout {
+				log.Debugf("%vResult for job %v received no timeout err for workmanager %v "+
+					"(err=%v)", temp, result.job.Index(),
+					result.peer.Addr(), result.err)
 				r.activeJob = nil
 			}
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have
 			// to track it anymore. We'll add it back if the result
 			// turns out to be an error.
-			batchNum, ok := currentQueries[result.Job.Index()]
+			batchNum, ok := currentQueries[result.job.Index()]
 			if !ok {
 				continue
 			}
-			delete(currentQueries, result.Job.Index())
+			delete(currentQueries, result.job.Index())
 			batch := currentBatches[batchNum]
 
 			switch {
 			// If the query ended because it was canceled, drop it.
-			case result.Err == ErrJobCanceled:
-				log.Tracef("Query(%d) was canceled before "+
-					"result was available from peer %v",
-					result.Job.Index(), result.Peer.Addr())
+			case result.err == ErrJobCanceled:
+				log.Tracef("%v Query(%d) was canceled before "+
+					"result was available from peer %v", temp,
+					result.job.Index(), result.peer.Addr())
 
 				// If this is the first job in this batch that
 				// was canceled, forward the error on the
@@ -275,97 +290,112 @@ func (w *WorkManager) workDispatcher() {
 				// cancellation applies to the whole batch.
 				//TODO(Maureen): Place holder code
 				//if batch != nil {
-				//	batch.errChan <- result.Err
+				//	batch.errChan <- result.err
 				//	delete(currentBatches, batchNum)
 				//
 				//	log.Debugf("Canceled batch %v",
 				//		batchNum)
 				//	continue Loop
 				//}
-				log.Warnf("Query(%d) from peer %v cancelled, "+
-					"rescheduling: %v", result.Job.Index(),
-					result.Peer.Addr(), result.Err)
+				log.Warnf("%v Query(%d) from peer %v cancelled, "+
+					"rescheduling: %v", temp, result.job.Index(),
+					result.peer.Addr(), result.err)
 				w.workRWMtx.Lock()
-				log.Warnf("Query(%d) locking job: %v", result.Job.Index(),
-					result.Peer.Addr(), result.Err)
-				heap.Push(w.work, result.Job)
+				//newJob := result.job
+				heap.Push(w.work, &result.job)
 				w.workRWMtx.Unlock()
-				log.Warnf("Query(%d) Out of locking job: %v", result.Job.Index(),
-					result.Peer.Addr(), result.Err)
 			// If the query ended with any other error, put it back
 			// into the work queue.
-			case result.Err != nil:
+			case result.err != nil:
 
-				log.Warnf("Query(%d) from peer %v failed, "+
-					"rescheduling: %v", result.Job.Index(),
-					result.Peer.Addr(), result.Err)
+				log.Warnf("%v Query(%d) from peer %v failed, "+
+					"rescheduling: %v", temp, result.job.Index(),
+					result.peer.Addr(), result.err)
 
 				w.workRWMtx.Lock()
-				heap.Push(w.work, result.Job)
+				log.Debugf("%v Query(%d) from peer %v failed, "+
+					"locking to write into work: %v", temp, result.job.Index(),
+					result.peer.Addr(), result.err)
+				//newJob := result.job
+				//newRequest := *result.job.Request
+				//newJob.Request = &newRequest
+				heap.Push(w.work, &result.job)
+				log.Debugf("%v Query(%d) from peer %v, "+
+					"on my way to unlocking to write out of work: %v", temp, result.job.Index(),
+					result.peer.Addr(), result.err)
 				w.workRWMtx.Unlock()
-				currentQueries[result.Job.Index()] = batchNum
+				currentQueries[result.job.Index()] = batchNum
 
-			// Otherwise we got a successful result and  update the
-			// status of the batch this query is a part of.
+				// Otherwise we got a successful result and  update the
+				// status of the batch this query is a part of.
 			default:
 
-				if result.UnFinished {
-					result.Job.JobIndex = result.Job.Index() + 0.0005
-					log.Debugf("Job %v is unfinished, creating new index", result.Job.Index())
-					log.Debugf("Length of testWork before push %v", w.work.Len())
+				if result.unFinished {
+					result.job.index = result.job.Index() + 0.0005
+					log.Debugf("%v job %v is unfinished, creating new index", result.job.Index())
+					log.Debugf("Length of testWork before push %v", temp, w.work.Len())
 					w.workRWMtx.Lock()
-					heap.Push(w.work, &result.Job)
+					//newJob := result.job
+					//newRequest := *result.job.Request
+					//newJob.Request = &newRequest
+					//log.Debugf("%v", newJob.Request)
+					//log.Debugf("Is pointer of newJob equal to prev? %v", newJob.Request == result.job.Request)
+					heap.Push(w.work, &result.job)
 					batch.rem++
-					log.Debugf("Length of testWork after push %v", w.work.Len())
+					log.Debugf("%v Length of testWork after push %v", temp, w.work.Len())
 					tem := w.work.Peek().(*QueryJob)
 					w.workRWMtx.Unlock()
-					log.Debugf("First element in the heap: %v", tem.Index())
-					currentQueries[result.Job.Index()] = batchNum
+					log.Debugf("%v First element in the heap: %v", temp, tem.Index())
+					currentQueries[result.job.Index()] = batchNum
 
-					continue
+				} else {
+					log.Debugf("%v job %v is Finished", temp, result.job.Index())
 				}
-				log.Debugf("Job %v is Finished", result.Job.Index())
-
 				// Decrement the number of queries remaining in
 				// the batch.
 				if batch != nil {
 					batch.rem--
-					log.Debugf("Remaining jobs for batch "+
-						"%v: %v ", batchNum, batch.rem)
+					log.Debugf("%v Remaining jobs for batch "+
+						"%v: %v ", temp, batchNum, batch.rem)
 
 					// If this was the last query in flight
 					// for this batch, we can notify that
 					// it finished, and delete it.
 					if batch.rem == 0 {
+						log.Debugf("batch.errchan == nil, %v", batch.errChan == nil)
+						if batch.errChan != nil {
+							batch.errChan <- result.err
+						}
+						delete(currentBatches, batchNum)
 
-						log.Debugf("Batch %v done",
+						log.Debugf("%v Batch done %v ", temp,
 							batchNum)
-						return
+
 					}
 				}
 			}
 
 			// If the total timeout for this batch has passed,
 			// return an error.
-			if batch != nil {
-				select {
-				case <-batch.timeout:
-					batch.errChan <- ErrQueryTimeout
-					delete(currentBatches, batchNum)
+			//if batch != nil {
+			//	select {
+			//	case <-batch.timeout:
+			//		batch.errChan <- ErrQueryTimeout
+			//		delete(currentBatches, batchNum)
+			//
+			//		log.Warnf("Query(%d) failed with "+
+			//			"error: %v. Timing out.",
+			//			result.job.Index(), result.err)
+			//
+			//		log.Debugf("Batch %v timed out",
+			//			batchNum)
+			//
+			//	default:
+			//		log.Debugf("%v In default statement for result chan wmgr", debugName)
+			//	}
+			//}
 
-					log.Warnf("Query(%d) failed with "+
-						"error: %v. Timing out.",
-						result.Job.Index(), result.Err)
-
-					log.Debugf("Batch %v timed out",
-						batchNum)
-
-				default:
-				}
-			}
-
-		// A new batch of queries where scheduled.
-
+			// A new batch of queries where scheduled.
 		// A new batch of queries where scheduled.
 		case batch := <-w.newBatches:
 			// Add all new queries in the batch to our work queue,
@@ -378,8 +408,7 @@ func (w *WorkManager) workDispatcher() {
 
 				w.workRWMtx.Lock()
 				heap.Push(w.work, &QueryJob{
-					JobIndex:   queryIndex,
-					timeout:    MinQueryTimeout,
+					index:      queryIndex,
 					encoding:   batch.options.encoding,
 					cancelChan: batch.options.cancelChan,
 					Request:    q,
@@ -397,6 +426,7 @@ func (w *WorkManager) workDispatcher() {
 			}
 			batchIndex++
 		case <-w.quit:
+			log.Debugf("Received the quit channel")
 			return
 		}
 	}
@@ -411,6 +441,10 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 		temp := w.cfg.Temp
 		log.Debugf("starting distrubute work for %s", temp)
 		defer w.wg.Done()
+		defer func() {
+
+			log.Debugf("Exited distributeWorkFunc %v", temp)
+		}()
 
 	Loop:
 		for {
@@ -437,30 +471,31 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 						continue
 					}
 
-					log.Debugf("Num eligible worker: %v, for %v", len(eligibleWorkers), temp)
 					eligibleWorkers = append(eligibleWorkers, r.w.Peer())
+					log.Debugf("Num eligible worker: %v, for %v, worker length %v", temp, len(eligibleWorkers), w.work.Len())
 					w.workersRWMutex.RLock()
 				}
 				w.workersRWMutex.RUnlock()
 
-				// Use the historical data to rank them.
-				w.cfg.Ranking.Order(eligibleWorkers)
+				// Use the historical data (last request duration) to rank them.
+				w.cfg.Order(eligibleWorkers)
 
 				// Give the job to the highest ranked peer with free
 				// slots available.
 				//log.Debugf("Trying to give eligible worker work: Num eligible worker: %v", len(eligibleWorkers))
 				for _, p := range eligibleWorkers {
+
 					w.workersRWMutex.RLock()
 					r := w.workers[p.Addr()]
 					w.workersRWMutex.RUnlock()
 
 					// The worker has free work slots, it should
 					// pick up the query.
-					log.Debugf("Giving Next job to peer: %v for %v", r.w.Peer(), temp)
+					log.Debugf("Giving Next job to peer: %v for %v", temp, r.w.Peer())
 					select {
 					case r.w.NewJob() <- next:
 						log.Debugf("Sent job %v to worker %v, for %v",
-							next.Index(), p, temp)
+							temp, next.Index(), p)
 
 						heap.Pop(w.work)
 						w.workRWMtx.Unlock()
@@ -478,7 +513,6 @@ func (w *WorkManager) distributeWorkFunc(eligibleWorkerFunc func(*activeWorker, 
 						delete(w.workers, p.Addr())
 						w.workersRWMutex.Unlock()
 						log.Debugf("Worker %v has exited %v", r.w.Peer().Addr(), temp)
-
 						continue
 
 					case <-w.quit:
@@ -521,13 +555,21 @@ func IsWorkerEligibleForBlkHdrFetch(r *activeWorker, next *QueryJob) bool {
 func IsWorkerEligibleForCFHdrFetch(r *activeWorker, _ *QueryJob) bool {
 	// Only one active job at a time is currently
 	// supported.
-	log.Debugf("In eligibility function for cfhdr")
 	if r.activeJob != nil {
 		return false
 	}
 
 	return true
 
+}
+
+// OrderPeers sorts the given peers according to the duration of its last request i.e. time
+// from request to response. Peers with lower duration come before those with a higher duration.
+func OrderPeers(peers []BlkHdrPeer) {
+	sort.Slice(peers, func(i, j int) bool {
+
+		return peers[i].LastReqDuration() < peers[j].LastReqDuration()
+	})
 }
 
 // Query distributes the slice of requests to the set of connected peers.
@@ -560,10 +602,4 @@ func (w *WorkManager) Query(requests []*Request,
 	}
 	log.Debugf("Out of sending query for %s", req)
 	return newBatch.options.errChan
-}
-
-func (w *WorkManager) ResultChan() chan *JobResult {
-
-	return w.jobResults
-
 }

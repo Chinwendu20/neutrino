@@ -119,7 +119,8 @@ type Request struct {
 	// processing.
 	HandleResp func(req, resp wire.Message, peerAddr string) Progress
 
-	SendQuery func(worker Worker, job Task)
+	SendQuery func(worker Worker, job Task) error
+	CloneReq  func(wire.Message) wire.Message
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
@@ -130,8 +131,6 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	Query(reqs []*Request, options ...QueryOption) chan error
-
-	ResultChan() chan *JobResult
 }
 
 // Peer is the interface that defines the methods needed by the query package

@@ -554,7 +554,7 @@ package neutrino
 //		// Create a mock peer to prevent panics when attempting to ban
 //		// a peer that served an invalid filter header.
 //		mockPeer := NewServerPeer(&ChainService{}, false)
-//		mockPeer.Peer, err = peer.NewOutboundPeer(
+//		mockPeer.peer, err = peer.NewOutboundPeer(
 //			NewPeerConfig(mockPeer), "127.0.0.1:8333",
 //		)
 //		if err != nil {
@@ -859,7 +859,7 @@ package neutrino
 //				}
 //
 //				sp := &ServerPeer{
-//					Peer: pp,
+//					peer: pp,
 //				}
 //				checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
 //			}
