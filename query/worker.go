@@ -120,21 +120,26 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	// Subscribe to messages from the peer.
 	msgChan, cancel := peer.SubscribeRecvMsg()
 	defer cancel()
+	defer func() {
+		fmt.Println("Exiting worker")
+	}()
 
 	for {
 		log.Debugf("%v Worker %v waiting for more work for %v", w.debugName, peer.Addr())
 
 		var job *QueryJob
+		fmt.Println("Worker running")
 		select {
 		// Poll a new job from the nextJob channel.
 		case job = <-w.nextJob:
 			log.Tracef("%v Worker %v picked up job with index %v for %v",
 				w.debugName, peer.Addr(), job.Index())
-
+			fmt.Println("received job")
 		// Ignore any message received while not working on anything.
 		case msg := <-msgChan:
 			log.Tracef("%v Worker %v ignoring received msg %T "+
 				"since no job active for %v", w.debugName, peer.Addr(), msg)
+			fmt.Println("received msg")
 			continue
 
 		// If the peer disconnected, we can exit immediately, as we
@@ -142,9 +147,11 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 		case <-peer.OnDisconnect():
 			log.Debugf("%v peer %v for worker disconnected for %v",
 				w.debugName, peer.Addr())
+			fmt.Println("disconnected")
 			return
 
 		case <-quit:
+			fmt.Println("quit")
 			return
 		}
 

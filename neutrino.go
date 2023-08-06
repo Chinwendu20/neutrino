@@ -676,7 +676,7 @@ type Config struct {
 // peerSubscription holds a peer subscription which we'll notify about any
 // connected peers.
 type peerSubscription struct {
-	peers  chan<- query.Peer
+	peers  chan<- query.BlkHdrPeer
 	cancel <-chan struct{}
 }
 

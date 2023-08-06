@@ -61,4 +61,8 @@ func (w *workQueue) Peek() interface{} {
 	return w.tasks[0]
 }
 
+func (w *workQueue) Seek(i int) interface{} {
+	return w.tasks[i]
+}
+
 // workQueue is struct implementing the heap interface, and is used to keep a

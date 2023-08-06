@@ -19,7 +19,7 @@ type getConnCountMsg struct {
 }
 
 type subConnPeersReply struct {
-	peerChan   chan query.Peer
+	peerChan   chan query.BlkHdrPeer
 	cancelChan chan struct{}
 }
 type subConnPeersMsg struct {
@@ -90,7 +90,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// Create a channel and fill it with the current set of
 		// connected peers.
 		cancelChan := make(chan struct{})
-		peerChan := make(chan query.Peer, state.Count())
+		peerChan := make(chan query.BlkHdrPeer, state.Count())
 		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
 				return
@@ -216,7 +216,7 @@ func (s *ChainService) ConnectedCount() int32 {
 // ConnectedPeers is a function that returns a channel where all connected
 // peers will be sent. It is assumed that all current peers will be sent
 // imemdiately, and new peers as they connect.
-func (s *ChainService) ConnectedPeers() (<-chan query.Peer, func(), error) {
+func (s *ChainService) ConnectedPeers() (<-chan query.BlkHdrPeer, func(), error) {
 	replyChan := make(chan subConnPeersReply, 1)
 
 	select {

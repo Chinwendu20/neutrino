@@ -41,8 +41,9 @@ func (m *mockPeer) QueueMessageWithEncoding(msg wire.Message,
 
 func (m *mockPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	msgChan := make(chan wire.Message)
+	fmt.Println("In subscriptions")
 	m.subscriptions <- msgChan
-
+	fmt.Println("Out of subscriptions")
 	return msgChan, func() {}
 }
 
@@ -702,3 +703,5 @@ func TestWorkerFeedbackErr(t *testing.T) {
 		}
 	}
 }
+
+//TODO(Maureen): Test of change in peer timeout

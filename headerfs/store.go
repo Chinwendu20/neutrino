@@ -74,10 +74,6 @@ type BlockHeaderStore interface {
 	// The information about the new header tip after truncation is
 	// returned.
 	RollbackLastBlock() (*BlockStamp, error)
-
-	// BlockLocatorFromHeight returns the block locator object based on the height
-	// supplied as argument to the function.
-	BlockLocatorFromHeight(uint32) (blockchain.BlockLocator, error)
 }
 
 // headerBufPool is a pool of bytes.Buffer that will be re-used by the various
@@ -484,25 +480,6 @@ func (h *blockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error)
 	}
 
 	return h.blockLocatorFromHash(chainTipHash)
-}
-
-// BlockLocatorFromHeight returns the block locator object based on the height
-// supplied as argument to the function.
-//
-// NOTE: Part of the BlockHeaderStore interface.
-func (h *blockHeaderStore) BlockLocatorFromHeight(height uint32) (blockchain.BlockLocator, error) {
-	// Lock store for read.
-	h.mtx.RLock()
-	defer h.mtx.RUnlock()
-
-	blockheader, err := h.FetchHeaderByHeight(height)
-	if err != nil {
-		return nil, err
-	}
-
-	blockHash := blockheader.BlockHash()
-
-	return h.blockLocatorFromHash(&blockHash)
 }
 
 // BlockLocatorFromHash computes a block locator given a particular hash. The

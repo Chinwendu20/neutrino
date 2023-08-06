@@ -115,7 +115,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
+			quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 
 	peerByAddr func(string) *ServerPeer
@@ -1253,7 +1253,7 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 	}
 
 	go b.cfg.BlkHdrQueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit), query.ErrChan(nil),
+		q.requests(), query.Cancel(b.quit), query.ErrChan(nil), query.NoTimeout(),
 	)
 
 }
@@ -1379,7 +1379,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
 	errChan := b.cfg.CfHdrQueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit),
+		q.requests(), query.Cancel(b.quit), query.ErrChan(make(chan error)),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
@@ -2391,66 +2391,71 @@ func (b *blockManager) writeCheckptHeaders() {
 		"height=%v", b.headerTip)
 
 	for b.nextCheckpoint != nil {
+		select {
+		case <-b.quit:
+			break
+		default:
+			b.writeBatchMtx.RLock()
+			respDetails, ok := b.hdrTipToResponse[int32(b.headerTip)]
+			b.writeBatchMtx.RUnlock()
 
-		b.writeBatchMtx.RLock()
-		respDetails, ok := b.hdrTipToResponse[int32(b.headerTip)]
-		b.writeBatchMtx.RUnlock()
+			if !ok {
+				continue
+			}
+			req := respDetails.request
+			reqMessage := req.Message.(*wire.MsgGetHeaders)
+			log.Debugf("Gotten tip"+
+				"Expected_height=%v, Start_height=%v, peer+%v", b.headerTip, req.startHeight)
 
-		if !ok {
-			continue
-		}
-		req := respDetails.request
-		reqMessage := req.Message.(*wire.MsgGetHeaders)
-		log.Debugf("Gotten tip"+
-			"Expected_height=%v, Start_height=%v, peer+%v", b.headerTip, req.startHeight)
+			initialHdrTip := b.headerTip
 
-		initialHdrTip := b.headerTip
+			b.syncPeerMutex.Lock()
+			log.Debugf("Updating sync peer"+
+				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.startHeight)
+			b.syncPeer = respDetails.response.Peer
+			b.syncPeerMutex.Unlock()
 
-		b.syncPeerMutex.Lock()
-		log.Debugf("Updating sync peer"+
-			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.startHeight)
-		b.syncPeer = respDetails.response.Peer
-		b.syncPeerMutex.Unlock()
+			log.Debugf("Sending to handleheaders"+
+				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.startHeight, respDetails.response.Peer.Addr(),
+			)
+			b.handleHeadersMsg(respDetails.response)
+			err := b.resetHeaderListToChainTip()
+			if err != nil {
+				log.Errorf(err.Error())
+			}
+			log.Debugf("New headertip %v", b.headerTip)
 
-		log.Debugf("Sending to handleheaders"+
-			"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, req.startHeight, respDetails.response.Peer.Addr(),
-		)
-		b.handleHeadersMsg(respDetails.response)
-		err := b.resetHeaderListToChainTip()
-		if err != nil {
-			log.Errorf(err.Error())
-		}
-		log.Debugf("New headertip %v", b.headerTip)
-
-		if b.headerTip <= initialHdrTip {
-			q := CheckpointedBlockHeadersQuery{
-				blockMgr: b,
-				msgs: []*headerQuery{
-					{
-						Message: &wire.MsgGetHeaders{
-							BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{&b.headerTipHash}),
-							HashStop:           reqMessage.HashStop,
+			if b.headerTip <= initialHdrTip {
+				q := CheckpointedBlockHeadersQuery{
+					blockMgr: b,
+					msgs: []*headerQuery{
+						{
+							Message: &wire.MsgGetHeaders{
+								BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{&b.headerTipHash}),
+								HashStop:           reqMessage.HashStop,
+							},
+							startHeight:   int32(b.headerTip),
+							initialHeight: req.startHeight,
+							startHash:     b.headerTipHash,
+							endHeight:     req.endHeight,
 						},
-						startHeight:   int32(b.headerTip),
-						initialHeight: req.startHeight,
-						startHash:     b.headerTipHash,
-						endHeight:     req.endHeight,
 					},
-				},
+				}
+
+				go b.cfg.BlkHdrQueryDispatcher.Query(
+					q.requests(), query.Cancel(b.quit), query.ErrChan(nil),
+				)
+
+				log.Debugf("Created new job from writecheckpt loop"+
+					"start_height=%v, end_height=%v", req.startHeight, req.endHeight)
+
+				log.Debugf("Sending result from writecheckpt loop")
+
 			}
 
-			go b.cfg.BlkHdrQueryDispatcher.Query(
-				q.requests(), query.Cancel(b.quit), query.ErrChan(nil),
-			)
-
-			log.Debugf("Created new job from writecheckpt loop"+
-				"start_height=%v, end_height=%v", req.startHeight, req.endHeight)
-
-			log.Debugf("Sending result from writecheckpt loop")
-
 		}
-
 	}
+
 	b.syncPeerMutex.Lock()
 	b.syncPeer = nil
 	b.syncPeerMutex.Unlock()

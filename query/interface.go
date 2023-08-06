@@ -32,6 +32,8 @@ type queryOptions struct {
 	cancelChan chan struct{}
 
 	errChan chan error
+
+	noTimeout bool
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -61,6 +63,13 @@ func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 func Timeout(timeout time.Duration) QueryOption {
 	return func(qo *queryOptions) {
 		qo.timeout = timeout
+	}
+}
+
+// NoTimeout is a query option that indicates that the query batch does not timeout.
+func NoTimeout() QueryOption {
+	return func(qo *queryOptions) {
+		qo.noTimeout = true
 	}
 }
 
