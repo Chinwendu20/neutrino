@@ -761,7 +761,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		query.NumRetries(qo.numRetries),
 	}
 
-	errChan := s.workManager.Query(
+	errChan := s.cfHdrWorkManager.Query(
 		[]*query.Request{filterQuery.request()}, opts...,
 	)
 
@@ -912,7 +912,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Send the request to the work manager and await a response.
-	errChan := s.workManager.Query([]*query.Request{request}, queryOpts...)
+	errChan := s.cfHdrWorkManager.Query([]*query.Request{request}, queryOpts...)
 	select {
 	case err := <-errChan:
 		if err != nil {
