@@ -26,7 +26,7 @@ var (
 	ErrResponseExistForQuery = errors.New("response Exists for query")
 )
 
-// QueryJob is the internal struct that wraps the Query to work on, in
+// QueryJob is the internal struct that wraps the QueryBatch to work on, in
 // addition to some information about the query.
 type QueryJob struct {
 	index      float64
@@ -216,7 +216,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			case resp := <-msgChan:
 				fmt.Println("Gotten response")
 				progress := job.HandleResp(
-					job.Req, resp, peer.Addr(),
+					job.Req, resp, peer.Addr(), job.index,
 				)
 
 				log.Debugf("Worker %v handled msg %T while "+

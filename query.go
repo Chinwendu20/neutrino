@@ -917,7 +917,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		if len(query.headerIndex) > 0 {
 			numFilters := query.stopHeight - query.startHeight + 1
 			numRecv := numFilters - int64(len(query.headerIndex))
-			log.Errorf("Query failed with %d out of %d filters "+
+			log.Errorf("QueryBatch failed with %d out of %d filters "+
 				"received", numRecv, numFilters)
 			return
 		}
@@ -932,7 +932,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		select {
 		case filter, ok = <-query.filterChan:
 			if !ok {
-				// Query has finished, if we have a result we'll
+				// QueryBatch has finished, if we have a result we'll
 				// return it.
 				if resultFilter == nil {
 					return nil, ErrFilterFetchFailed

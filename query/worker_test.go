@@ -83,7 +83,7 @@ func (m *mockPeer) IsSyncCandidate() bool {
 func makeJob() *QueryJob {
 	q := &Request{
 		Req: req,
-		HandleResp: func(req, resp wire.Message, _ string) Progress {
+		HandleResp: func(req, resp wire.Message, _ string, _ float64) Progress {
 			if resp == finalResp {
 				return Progress{
 					Finished:   true,

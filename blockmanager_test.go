@@ -41,10 +41,13 @@ type mockDispatcher struct {
 
 var _ query.Dispatcher = (*mockDispatcher)(nil)
 
-func (m *mockDispatcher) Query(requests []*query.Request,
+func (m *mockDispatcher) QueryBatch(requests []*query.Request,
 	options ...query.QueryOption) chan error {
 
 	return m.query(requests, options...)
+}
+func (m *mockDispatcher) QueryOnce(_ *query.RetryRequest) {
+	return
 }
 
 // setupBlockManager initialises a blockManager to be used in tests.
@@ -394,7 +397,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Let the blockmanager handle the
 					// message.
 					progress := requests[index].HandleResp(
-						msgs[index], &resp, "",
+						msgs[index], &resp, "", float64(0),
 					)
 
 					if !progress.Finished {
@@ -415,7 +418,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Otherwise resend the response we
 					// just sent.
 					progress = requests[index].HandleResp(
-						msgs[index], &resp2, "",
+						msgs[index], &resp2, "", float64(0),
 					)
 					if !progress.Finished {
 						errChan <- fmt.Errorf("got "+
@@ -658,7 +661,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				// expect.
 				for i := range responses {
 					progress := requests[i].HandleResp(
-						msgs[i], responses[i], "",
+						msgs[i], responses[i], "", float64(0),
 					)
 					if i == test.firstInvalid {
 						if progress.Finished {

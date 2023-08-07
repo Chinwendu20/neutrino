@@ -126,20 +126,26 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peerAddr string) Progress
+	HandleResp func(req, resp wire.Message, peerAddr string, index float64) Progress
 
 	SendQuery func(worker Worker, job Task) error
 	CloneReq  func(wire.Message) wire.Message
 }
 
+type RetryRequest struct {
+	Index float64
+}
+
 // Dispatcher is an interface defining the API for dispatching queries to
 // bitcoin peers.
 type Dispatcher interface {
-	// Query distributes the slice of requests to the set of connected
+	// QueryBatch distributes the slice of requests to the set of connected
 	// peers. It returns an error channel where the final result of the
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
-	Query(reqs []*Request, options ...QueryOption) chan error
+	QueryBatch(reqs []*Request, options ...QueryOption) chan error
+
+	QueryOnce(reqs *RetryRequest)
 }
 
 // Peer is the interface that defines the methods needed by the query package

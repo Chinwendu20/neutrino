@@ -1032,7 +1032,7 @@ func TestWorkManangerQuery(t *testing.T) {
 
 	ctx := setup(0, 0)
 
-	go ctx.wmgr.Query(createRequests(5))
+	go ctx.wmgr.QueryBatch(createRequests(5))
 
 	defaultOption := defaultQueryOptions()
 
@@ -1060,7 +1060,7 @@ func TestWorkManangerQuery(t *testing.T) {
 	}
 
 	errChan := make(chan error)
-	go ctx.wmgr.Query(createRequests(2), ErrChan(errChan))
+	go ctx.wmgr.QueryBatch(createRequests(2), ErrChan(errChan))
 
 	close(ctx.wmgr.quit)
 
