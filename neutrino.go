@@ -317,6 +317,8 @@ func (sp *ServerPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 	log.Tracef("Got headers with %d items from %s", len(msg.Headers),
 		p.Addr())
+	fmt.Printf("Got headers with %d items from %s\n", len(msg.Headers),
+		p.Addr())
 	sp.server.blockManager.QueueHeaders(msg, sp)
 }
 
@@ -676,7 +678,7 @@ type Config struct {
 // peerSubscription holds a peer subscription which we'll notify about any
 // connected peers.
 type peerSubscription struct {
-	peers  chan<- query.BlkHdrPeer
+	peers  chan<- query.Peer
 	cancel <-chan struct{}
 }
 
@@ -797,24 +799,21 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
 
-	//Create queryConfig  for the two work managers
-	queryConfig := &query.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
-		Order:          query.OrderPeers,
-	}
+	s.cfHdrWorkManager = query.New(&query.Config{
+		ConnectedPeers:       s.ConnectedPeers,
+		NewWorker:            query.NewWorker,
+		Order:                query.OrderPeers,
+		Temp:                 "cfhdrWorkmanager",
+		IsEligibleWorkerFunc: query.IsWorkerEligibleForCFHdrFetch,
+	})
 
-	//Update specific fields for cfHdrWorkManager and create a
-	//workManager instance with it.
-	queryConfig.IsEligibleWorkerFunc = query.IsWorkerEligibleForCFHdrFetch
-	queryConfig.Temp = "cfhdrWorkmanager"
-	s.cfHdrWorkManager = query.New(queryConfig)
-
-	//Update specific fields for blkHdrWorkManager and create a
-	//workManager instance with it.
-	queryConfig.IsEligibleWorkerFunc = query.IsWorkerEligibleForBlkHdrFetch
-	queryConfig.Temp = "blkhdrWorkmanager"
-	s.blkHdrWorkManager = query.New(queryConfig)
+	s.blkHdrWorkManager = query.New(&query.Config{
+		ConnectedPeers:       s.ConnectedPeers,
+		NewWorker:            query.NewWorker,
+		Order:                query.OrderPeers,
+		Temp:                 "blkHdrWorkManager",
+		IsEligibleWorkerFunc: query.IsWorkerEligibleForBlkHdrFetch,
+	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
@@ -876,7 +875,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		GetBlock:              s.GetBlock,
 		firstPeerSignal:       s.firstPeerConnect,
 		queryAllPeers:         s.queryAllPeers,
-		peerByAddr:            s.PeerByAddr,
 	})
 	if err != nil {
 		return nil, err
@@ -1708,6 +1706,7 @@ func (s *ChainService) Start() error {
 // peers and the main listener.
 func (s *ChainService) Stop() error {
 	// Make sure this only happens once.
+	fmt.Println("Stopping chain service")
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
 	}
@@ -1721,10 +1720,6 @@ func (s *ChainService) Stop() error {
 	}
 	if err := s.cfHdrWorkManager.Stop(); err != nil {
 		log.Errorf("error stopping cfHdrWorkManager work manager: %v", err)
-		returnErr = err
-	}
-	if err := s.blkHdrWorkManager.Stop(); err != nil {
-		log.Errorf("error stopping blkHdrWorkManager work manager: %v", err)
 		returnErr = err
 	}
 	s.blockSubscriptionMgr.Stop()

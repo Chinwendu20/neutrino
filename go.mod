@@ -34,4 +34,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
+replace github.com/btcsuite/btcd => ../btcd
+
 go 1.18

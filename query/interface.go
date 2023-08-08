@@ -126,7 +126,7 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peerAddr string, index float64) Progress
+	HandleResp func(req, resp wire.Message, peer Peer, index float64) Progress
 
 	SendQuery func(worker Worker, job Task) error
 	CloneReq  func(wire.Message) wire.Message
@@ -168,12 +168,6 @@ type Peer interface {
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
 	OnDisconnect() <-chan struct{}
-}
-
-// BlkHdrPeer is the interface that defines the methods needed by the query package
-// to be able to make getheader requests and receive responses from a network peer.
-type BlkHdrPeer interface {
-	Peer
 
 	// IsPeerBehindStartHeight checks if the peer's height is behind
 	// the query's start height.

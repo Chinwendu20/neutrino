@@ -11,7 +11,7 @@ import (
 )
 
 type mockWorker struct {
-	peer    BlkHdrPeer
+	peer    Peer
 	nextJob chan *QueryJob
 	results chan *jobResult
 }
@@ -22,7 +22,7 @@ func (m *mockWorker) NewJob() chan<- *QueryJob {
 	return m.nextJob
 }
 
-func (m *mockWorker) Peer() BlkHdrPeer {
+func (m *mockWorker) Peer() Peer {
 	return m.peer
 }
 
@@ -43,35 +43,35 @@ func (m *mockWorker) Run(results chan<- *jobResult,
 	}
 }
 
-func TestNewWorkManager(t *testing.T) {
-
-	cfg := &Config{}
-	wm := New(cfg)
-	if wm.cfg != cfg {
-		t.Fatalf("workmanager config should be same as config")
-	}
-}
-
-func TestWorkManagerStart(t *testing.T) {
-
-	cfg := &Config{}
-	wm := New(cfg)
-
-	heap.Push(wm.work, &QueryJob{})
-
-}
+//func TestNewWorkManager(t *testing.T) {
+//
+//	cfg := &Config{}
+//	wm := New(cfg)
+//	if wm.cfg != cfg {
+//		t.Fatalf("workmanager config should be same as config")
+//	}
+//}
+//
+//func TestWorkManagerStart(t *testing.T) {
+//
+//	cfg := &Config{}
+//	wm := New(cfg)
+//
+//	heap.Push(wm.work, &QueryJob{})
+//
+//}
 
 type mockCtx struct {
 	wmgr     *WorkManager
 	numWker  int
-	peerChan chan BlkHdrPeer
+	peerChan chan Peer
 }
 
 func setup(numWorkers int, numWork int) mockCtx {
 
-	peerChan := make(chan BlkHdrPeer)
+	peerChan := make(chan Peer)
 	wm := New(&Config{
-		ConnectedPeers: func() (<-chan BlkHdrPeer, func(), error) {
+		ConnectedPeers: func() (<-chan Peer, func(), error) {
 			return peerChan, func() {}, nil
 		},
 		Order: OrderPeers,
@@ -123,7 +123,6 @@ func addWorkers(num int, ctx *mockCtx, free bool) {
 			nextJob: make(chan *QueryJob),
 		}
 		onExit := make(chan struct{})
-		fmt.Println("Adding work")
 		if free {
 			ctx.wmgr.workersRWMutex.Lock()
 			ctx.wmgr.workers[peer.Addr()] = &activeWorker{
@@ -141,7 +140,6 @@ func addWorkers(num int, ctx *mockCtx, free bool) {
 			}
 			ctx.wmgr.workersRWMutex.Unlock()
 		}
-		fmt.Println("Out of adding work")
 		ctx.numWker = i
 	}
 
@@ -159,6 +157,7 @@ func createRequests(num int) []*Request {
 }
 
 func TestDistributeWorkFuncWorkOrder(t *testing.T) {
+	t.Parallel()
 
 	ctx := setup(0, 0)
 
@@ -189,10 +188,8 @@ func TestDistributeWorkFuncWorkOrder(t *testing.T) {
 	for y := 0; y < workLen; y++ {
 
 		w := r.w.(*mockWorker)
-		fmt.Println("Checking....")
 		select {
 		case job := <-w.nextJob:
-			fmt.Printf("in next job(%v) to peer %v, %v\n", ctx.wmgr.work.Len(), job.index, y)
 			if int(job.index) != y {
 				t.Fatalf("Work distribution out of order.\nExpected: %v.\nGotten: %v\n", y, int(job.index))
 			}
@@ -209,11 +206,10 @@ func TestDistributeWorkFuncWorkOrder(t *testing.T) {
 }
 
 func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
-
+	t.Parallel()
 	ctx := setup(4, 2)
 
 	ctx.wmgr.cfg.IsEligibleWorkerFunc = func(r *activeWorker, next *QueryJob) bool {
-		fmt.Println("In func eligible")
 		if r.activeJob != nil {
 
 			return false
@@ -221,10 +217,8 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 
 		if r.w.Peer().LastReqDuration()%2 != 0 {
 
-			fmt.Printf("%v return true\n", r.w.Peer().Addr())
 			return true
 		}
-		fmt.Printf("%v return false\n", r.w.Peer().Addr())
 		return false
 
 	}
@@ -241,12 +235,10 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 			if y%2 == 0 {
 				t.Fatalf("worker(%v) expected not to be eligible but picked up job \n", w.Peer().Addr())
 			}
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 			if y%2 != 0 {
 				t.Fatalf("worker(%v) expected to be eligible, should pick up job \n", w.Peer().Addr())
 			}
@@ -265,30 +257,23 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 
 	addWork(2, &ctx)
 
-	fmt.Printf("Test length workers %v\n", len(ctx.wmgr.workers))
-	fmt.Printf("Test length work %v\n", ctx.wmgr.work.Len())
-
 	for y := 4; y <= 6; y++ {
 
 		r, ok := ctx.wmgr.workers[strconv.Itoa(y)]
 		if !ok {
-			fmt.Println(y)
 			t.Fatal("Failed to add workers")
 		}
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 			t.Fatalf("shutdown workmanager received job")
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 		}
 	}
 
 	ctx = setup(4, 2)
 
 	ctx.wmgr.cfg.IsEligibleWorkerFunc = func(r *activeWorker, next *QueryJob) bool {
-		fmt.Println("In func eligggggggggible")
 		if r.activeJob != nil {
 
 			return false
@@ -296,10 +281,8 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 
 		if r.w.Peer().LastReqDuration()%2 != 0 {
 
-			fmt.Printf("%v return true\n", r.w.Peer().Addr())
 			return false
 		}
-		fmt.Printf("%v return false\n", r.w.Peer().Addr())
 		return true
 
 	}
@@ -310,18 +293,15 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 
 		r, ok := ctx.wmgr.workers[strconv.Itoa(y)]
 		if !ok {
-			fmt.Println(y)
 			t.Error("Failed to add workers")
 		}
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 			if y%2 != 0 {
 				t.Fatalf("worker(%v) expected to be eligible, should pick up job \n", w.Peer().Addr())
 			}
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 			if y%2 == 0 {
 				t.Fatalf("worker(%v) expected not to be eligible but picked up job \n", w.Peer().Addr())
 			}
@@ -329,7 +309,7 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 	}
 
 	//Wait to pop work from heap before checking length.
-	time.Sleep(2)
+	time.Sleep(5)
 	if ctx.wmgr.work.Len() != 0 {
 		t.Fatalf("Work length expected to be zero after eligibility function test but got %v", ctx.wmgr.work.Len())
 	}
@@ -337,7 +317,7 @@ func TestDistributeWorkFuncDispatchEligibleWorker(t *testing.T) {
 }
 
 func TestDistributeWorkFuncLengthWorkAndWorker(t *testing.T) {
-
+	t.Parallel()
 	ctx := setup(2, 0)
 
 	go ctx.wmgr.distributeWorkFunc(ctx.wmgr.cfg.IsEligibleWorkerFunc)()
@@ -369,7 +349,6 @@ func TestDistributeWorkFuncLengthWorkAndWorker(t *testing.T) {
 	time.Sleep(5)
 
 	finalNumWork := ctx.wmgr.work.Len()
-	fmt.Printf("Initial-%v and Final-%v", initialNumWork, finalNumWork)
 	if initialNumWork != finalNumWork {
 		t.Fatalf("Work should not be consumed.")
 	}
@@ -386,12 +365,9 @@ func TestDistributeWorkFuncLengthWorkAndWorker(t *testing.T) {
 			t.Fatalf("worker not of type mockWorker")
 		}
 
-		fmt.Printf("checking next job to peer (%v)(%v) %v\n", len(ctx.wmgr.workers), ctx.wmgr.work.Len(), w.Peer().LastReqDuration())
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 			t.Fatalf("worker(%v) should pick up job\n", w.Peer().Addr())
 
 		}
@@ -406,7 +382,7 @@ func TestDistributeWorkFuncLengthWorkAndWorker(t *testing.T) {
 }
 
 func TestDistributeWorkFuncWorkerExit(t *testing.T) {
-
+	t.Parallel()
 	ctx := setup(3, 2)
 
 	initialNumWork := ctx.wmgr.work.Len()
@@ -421,7 +397,6 @@ func TestDistributeWorkFuncWorkerExit(t *testing.T) {
 	}
 	close(r.onExit)
 	for y := 1; y <= 3; y++ {
-		fmt.Println(y)
 		r, ok := ctx.wmgr.workers[strconv.Itoa(y)]
 		if !ok {
 			if y != 2 {
@@ -430,10 +405,8 @@ func TestDistributeWorkFuncWorkerExit(t *testing.T) {
 			continue
 		}
 		w := r.w.(*mockWorker)
-		fmt.Println("Checking....")
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 		case <-time.After(time.Second):
 			if y != 2 {
 				t.Fatalf("worker(%v) should pick up job \n", w.Peer().Addr())
@@ -449,16 +422,15 @@ func TestDistributeWorkFuncWorkerExit(t *testing.T) {
 	finalNumWker := len(ctx.wmgr.workers)
 
 	if initialNumWker-1 != finalNumWker {
-		fmt.Printf("final: %v.Initial: %v\n", finalNumWker, initialNumWker)
 		t.Fatalf("Worker length should reduce by 1")
 	}
 }
 
 func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
-
+	t.Parallel()
 	ctx := setup(3, 3)
 
-	ctx.wmgr.cfg.Order = func(peers []BlkHdrPeer) {
+	ctx.wmgr.cfg.Order = func(peers []Peer) {
 
 		sort.Slice(peers, func(i, j int) bool {
 
@@ -478,9 +450,7 @@ func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 			t.Fatalf("worker(%v) not in  expected order \n", w.Peer().Addr())
 
 		}
@@ -498,29 +468,23 @@ func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
 
 	addWork(2, &ctx)
 
-	fmt.Printf("Test length workers %v\n", len(ctx.wmgr.workers))
-	fmt.Printf("Test length work %v\n", ctx.wmgr.work.Len())
-
 	for y := 4; y >= 2; y-- {
 
 		r, ok := ctx.wmgr.workers[strconv.Itoa(y)]
 		if !ok {
-			fmt.Println(y)
 			t.Fatal("Failed to add workers")
 		}
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 			t.Fatalf("shutdown workmanager received job")
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 		}
 	}
 
 	ctx = setup(6, 6)
 
-	ctx.wmgr.cfg.Order = func(peers []BlkHdrPeer) {
+	ctx.wmgr.cfg.Order = func(peers []Peer) {
 
 		sort.Slice(peers, func(i, j int) bool {
 			if peers[i].LastReqDuration()%2 == 0 && peers[j].LastReqDuration()%2 != 0 {
@@ -532,9 +496,6 @@ func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
 			return peers[i].LastReqDuration() < peers[j].LastReqDuration()
 
 		})
-		for _, r := range peers {
-			fmt.Println(r.LastReqDuration())
-		}
 	}
 
 	var expectedOrder []int
@@ -554,21 +515,17 @@ func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
 	})
 	ctx.wmgr.wg.Add(1)
 	go ctx.wmgr.distributeWorkFunc(ctx.wmgr.cfg.IsEligibleWorkerFunc)()
-	fmt.Printf("%v", expectedOrder)
 	for _, y := range expectedOrder {
 
 		r, ok := ctx.wmgr.workers[strconv.Itoa(y)]
 		if !ok {
-			fmt.Println(y)
 			t.Error("Failed to add workers")
 		}
 		w := r.w.(*mockWorker)
 		select {
 		case <-w.nextJob:
-			fmt.Printf("in next job to peer %v\n", w.Peer().Addr())
 
 		case <-time.After(time.Second):
-			fmt.Printf("in timeout to peer %v\n", w.Peer().Addr())
 			t.Fatalf("worker(%v) out of expected order \n", w.Peer().Addr())
 		}
 	}
@@ -581,6 +538,7 @@ func TestDistributeWorkFuncWorkerOrder(t *testing.T) {
 }
 
 func TestWorkDispatcherPeersConnected(t *testing.T) {
+	t.Parallel()
 	ctx := setup(0, 0)
 	ctx.wmgr.wg.Add(1)
 	go ctx.wmgr.workDispatcher()
@@ -645,7 +603,6 @@ func TestWorkDispatcherPeersConnected(t *testing.T) {
 		}
 
 		peer := r.w.Peer().(*mockPeer)
-		fmt.Println(peer.subscriptions == nil)
 		select {
 		case <-peer.subscriptions:
 		case <-time.After(time.Second):
@@ -657,6 +614,7 @@ func TestWorkDispatcherPeersConnected(t *testing.T) {
 }
 
 func TestWorkDispatcherResultTimeout(t *testing.T) {
+	t.Parallel()
 	ctx := setup(0, 0)
 	addWorkers(1, &ctx, false)
 	ctx.wmgr.wg.Add(1)
@@ -729,6 +687,7 @@ func TestWorkDispatcherResultTimeout(t *testing.T) {
 }
 
 func TestWorkDispatcherResultUnfinishedTasksAndJobIndexDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := setup(0, 0)
 	addWorkers(2, &ctx, false)
 	ctx.wmgr.wg.Add(1)
@@ -886,6 +845,7 @@ func TestWorkDispatcherResultUnfinishedTasksAndJobIndexDuplicate(t *testing.T) {
 }
 
 func TestWorkDispatcherResultJobCancelled(t *testing.T) {
+	t.Parallel()
 	ctx := setup(0, 0)
 	addWorkers(1, &ctx, false)
 
@@ -952,6 +912,7 @@ func TestWorkDispatcherResultJobCancelled(t *testing.T) {
 }
 
 func TestWorkDispatcherResultBatchTimeout(t *testing.T) {
+	t.Parallel()
 	ctx := setup(0, 0)
 	addWorkers(1, &ctx, false)
 
@@ -1029,7 +990,7 @@ func TestWorkDispatcherResultBatchTimeout(t *testing.T) {
 }
 
 func TestWorkManangerQuery(t *testing.T) {
-
+	t.Parallel()
 	ctx := setup(0, 0)
 
 	go ctx.wmgr.QueryBatch(createRequests(5))

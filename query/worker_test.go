@@ -41,9 +41,8 @@ func (m *mockPeer) QueueMessageWithEncoding(msg wire.Message,
 
 func (m *mockPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	msgChan := make(chan wire.Message)
-	fmt.Println("In subscriptions")
+
 	m.subscriptions <- msgChan
-	fmt.Println("Out of subscriptions")
 	return msgChan, func() {}
 }
 
@@ -170,7 +169,6 @@ func startWorker() (*testCtx, error) {
 		return nil, fmt.Errorf("did not subscribe to msgs")
 	}
 	peer.responses = sub
-	fmt.Printf("sub %T", sub)
 
 	return &testCtx{
 		nextJob:    wk.NewJob(),
@@ -209,7 +207,6 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	// First give the worker a few random responses. These will all be
 	// ignored.
 	for i := 0; i < 5; i++ {
-		fmt.Println(i)
 		select {
 		case ctx.peer.responses <- &wire.MsgTx{}:
 		case <-time.After(time.Second):
@@ -437,7 +434,6 @@ func TestWorkerProgress(t *testing.T) {
 	// then for a result that has finished
 	resp := progressResp
 	for i := 0; i < 2; i++ {
-		fmt.Printf("\n %v", i)
 		// Create a task.
 		task := makeJob()
 
@@ -534,10 +530,8 @@ func TestWorkerJobCanceled(t *testing.T) {
 	// worker.
 	canceled := false
 	for i := 0; i < 2; i++ {
-		fmt.Printf("%v\n", "ppppppp")
 		select {
 		case ctx.nextJob <- task:
-			fmt.Printf("\n sent job")
 		case <-time.After(1 * time.Second):
 			t.Fatalf("did not pick up job")
 		}
@@ -624,7 +618,6 @@ func TestWorkerFeedbackErr(t *testing.T) {
 	//3. Return no error which should return that same error in the result.
 	ctx.peer.err = ErrResponseExistForQuery
 	for i := 0; i < 3; i++ {
-		fmt.Printf("%v\n", i)
 
 		select {
 		case ctx.nextJob <- task:

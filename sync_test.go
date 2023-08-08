@@ -1251,6 +1251,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"ChainService: %s", err)
 		}
 	}
+	fmt.Printf("Sync time %v\n", total.Seconds())
 
 	// Check if we're current.
 	if !svc.IsCurrent() {
