@@ -115,7 +115,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
+			quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -2435,7 +2435,9 @@ func (b *blockManager) blockHandler() {
 	}
 
 	//Loop to fetch headers within the check pointed range
+	b.newHeadersMtx.RLock()
 	for b.headerTip < uint32(checkpoints[len(checkpoints)-1].Height) {
+		b.newHeadersMtx.RUnlock()
 		select {
 		case m := <-b.peerChan:
 			switch msg := m.(type) {
@@ -2454,7 +2456,10 @@ func (b *blockManager) blockHandler() {
 			return
 
 		}
+		b.newHeadersMtx.RLock()
 	}
+	b.newHeadersMtx.RUnlock()
+
 	fmt.Println("Starting sync")
 	b.startSync(candidatePeers)
 
@@ -2508,66 +2513,88 @@ func (b *blockManager) writeCheckptHeaders() {
 	fmt.Printf("writeCheckptHeaders started at initial height"+
 		"height=%v\n", b.headerTip)
 	lenCheckPts := len(b.cfg.ChainParams.Checkpoints)
+	b.newHeadersMtx.RLock()
 	for int32(b.headerTip) <= b.cfg.ChainParams.Checkpoints[lenCheckPts-1].Height {
+		hdrTip := b.headerTip
+		b.newHeadersMtx.RUnlock()
 		select {
 		case <-b.quit:
 			break
 		default:
 			b.writeBatchMtx.RLock()
-			r, ok := b.hdrTipToResponse[int32(b.headerTip)]
+			r, ok := b.hdrTipToResponse[int32(hdrTip)]
 			b.writeBatchMtx.RUnlock()
 
 			if !ok {
+				b.newHeadersMtx.RLock()
 				continue
 			}
 			respDetails := r
 
 			log.Debugf("Gotten tip"+
-				"Expected_height=%v, Start_height=%v, peer+%v", b.headerTip)
-
-			initialHdrTip := b.headerTip
+				"Expected_height=%v, Start_height=%v, peer+%v", hdrTip)
 
 			b.syncPeerMutex.Lock()
 			log.Debugf("Updating sync peer"+
-				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip)
+				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", hdrTip)
 			b.syncPeer = respDetails.response.Peer
 			b.syncPeerMutex.Unlock()
 
 			log.Debugf("Sending to handleheaders"+
-				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", b.headerTip, respDetails.response.Peer.Addr(),
+				"Expected_height=%v, Start_height=%v, peer+%v, index=%v", hdrTip, respDetails.response.Peer.Addr(),
 			)
 			fmt.Printf("Sending to handleheaders"+
-				"Expected_height=%v, peer+%v\n", b.headerTip, respDetails.response.Peer.Addr(),
+				"Expected_height=%v, peer+%v\n", hdrTip, respDetails.response.Peer.Addr(),
 			)
 			b.handleHeadersMsg(respDetails.response)
 			err := b.resetHeaderListToChainTip()
 			if err != nil {
 				log.Errorf(err.Error())
 			}
-			log.Debugf("New headertip %v", b.headerTip)
 
-			if b.headerTip <= initialHdrTip {
+			finalNode := b.headerList.Back()
+			newHdrTip := finalNode.Height
+			newHdrTipHash := finalNode.Header.BlockHash()
+			prevCheckPt := b.findPreviousHeaderCheckpoint(newHdrTip)
+
+			log.Debugf("New headertip %v", newHdrTip)
+
+			if uint32(newHdrTip) <= hdrTip {
 
 				b.writeBatchMtx.Lock()
-				delete(b.hdrTipToResponse, int32(b.headerTip))
+				delete(b.hdrTipToResponse, int32(hdrTip))
 				b.writeBatchMtx.Unlock()
 
 				fmt.Println("reorg issue?")
 				go b.cfg.BlkHdrQueryDispatcher.QueryOnce(
 					&query.RetryRequest{
 						Index: respDetails.index,
+						NewReq: &headerQuery{
+							Message: &wire.MsgGetHeaders{
+								BlockLocatorHashes: []*chainhash.Hash{&newHdrTipHash},
+								HashStop:           *b.nextCheckpoint.Hash,
+							},
+							startHeight:   newHdrTip,
+							initialHeight: prevCheckPt.Height,
+							startHash:     newHdrTipHash,
+							endHeight:     b.nextCheckpoint.Height,
+							initialHash:   newHdrTipHash,
+						},
 					},
 				)
 
 				log.Debugf("Created new job from writecheckpt loop"+
-					"b.headerTip=%v", b.headerTip)
+					"b.headerTip=%v", newHdrTip)
 
 				log.Debugf("Sending result from writecheckpt loop")
 
 			}
 
 		}
+		b.newHeadersMtx.RLock()
 	}
+	b.newHeadersMtx.RUnlock()
+
 	b.syncPeerMutex.Lock()
 	b.syncPeer = nil
 	b.syncPeerMutex.Unlock()

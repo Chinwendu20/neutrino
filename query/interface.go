@@ -134,7 +134,7 @@ type Request struct {
 
 type RetryRequest struct {
 	Index  float64
-	NewJob wire.Message
+	NewReq wire.Message
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
