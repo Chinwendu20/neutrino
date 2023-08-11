@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
@@ -396,8 +397,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 					// Let the blockmanager handle the
 					// message.
+					testErr := errors.New("")
 					progress := requests[index].HandleResp(
-						msgs[index], &resp, nil, float64(0),
+						msgs[index], &resp, nil, float64(0), &testErr,
 					)
 
 					if !progress.Finished {
@@ -418,7 +420,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Otherwise resend the response we
 					// just sent.
 					progress = requests[index].HandleResp(
-						msgs[index], &resp2, nil, float64(0),
+						msgs[index], &resp2, nil, float64(0), &testErr,
 					)
 					if !progress.Finished {
 						errChan <- fmt.Errorf("got "+
@@ -659,9 +661,10 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			go func() {
 				// Check that the success of the callback match what we
 				// expect.
+				testErr := errors.New("")
 				for i := range responses {
 					progress := requests[i].HandleResp(
-						msgs[i], responses[i], nil, float64(0),
+						msgs[i], responses[i], nil, float64(0), &testErr,
 					)
 					if i == test.firstInvalid {
 						if progress.Finished {

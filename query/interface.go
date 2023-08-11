@@ -126,14 +126,15 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peer Peer, index float64) Progress
+	HandleResp func(req, resp wire.Message, peer Peer, index float64, err *error) Progress
 
 	SendQuery func(worker Worker, job Task) error
 	CloneReq  func(wire.Message) wire.Message
 }
 
 type RetryRequest struct {
-	Index float64
+	Index  float64
+	NewJob wire.Message
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to

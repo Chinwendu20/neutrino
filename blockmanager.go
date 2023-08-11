@@ -115,7 +115,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
+		quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -385,6 +385,7 @@ func (b *blockManager) Stop() error {
 	b.wg.Wait()
 
 	close(done)
+	fmt.Println("Block manager shutting down")
 	return nil
 }
 
@@ -921,17 +922,12 @@ func (c *checkpointedCFHeadersQuery) sendQuery(worker query.Worker,
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peer query.Peer, _ float64) query.Progress {
-	log.Debugf("Inside  cfworkmanager handle response for %v ", peer.Addr())
-
-	peerAddr := peer.Addr()
-	if peer == nil {
-		log.Debugf("peer is nil in cfworkmananger")
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+	peer query.Peer, _ float64, _ *error) query.Progress {
+	peerAddr := ""
+	if peer != nil {
+		peerAddr = peer.Addr()
 	}
+	log.Debugf("Inside  cfworkmanager handle response for %v ", peerAddr)
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
@@ -961,7 +957,12 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 		}
 	}
 	log.Debugf("Updating duration cfmgr")
-	peer.UpdateRequestDuration()
+	if peer != nil {
+
+		peer.UpdateRequestDuration()
+
+	}
+
 	_, ok = c.queryResponses[checkPointIndex]
 	if ok {
 
@@ -1121,7 +1122,7 @@ func (c *CheckpointedBlockHeadersQuery) PushHeadersMsg(w query.Worker,
 }
 
 func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
-	peer query.Peer, index float64) query.Progress {
+	peer query.Peer, index float64, jobErr *error) query.Progress {
 
 	peerAddr := peer.Addr()
 	sp := peer.(*ServerPeer)
@@ -1178,6 +1179,7 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
 	hdrLength := len(msg.Headers)
 	if hdrLength == 0 {
 		fmt.Println("handleresp Hdrlength zero")
+		jobErr = &query.ErrResponseErr
 		return query.Progress{
 			Finished:   true,
 			Progressed: false,
@@ -1189,6 +1191,7 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
 
 		sp.Disconnect()
 		fmt.Println(" handleresp Checkpoint does not start")
+		jobErr = &query.ErrResponseErr
 		return query.Progress{
 			Finished:   true,
 			Progressed: false,
@@ -1200,6 +1203,7 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
 	if hdrLength > int(request.endHeight-request.startHeight) {
 
 		sp.Disconnect()
+		jobErr = &query.ErrResponseErr
 		fmt.Printf(" handleresp resp length %v grater than expected %v\n", hdrLength, int(request.endHeight-request.startHeight))
 		return query.Progress{
 			Finished:   true,
@@ -1247,17 +1251,15 @@ func (c *CheckpointedBlockHeadersQuery) handleResponse(req, resp wire.Message,
 		_, ok = c.blockMgr.hdrTipToResponse[request.startHeight]
 		c.blockMgr.writeBatchMtx.RUnlock()
 		fmt.Printf("responses-(%v)-startHeight-%v\n", len(c.blockMgr.hdrTipToResponse), request.startHeight)
-		if ok {
+		if !ok {
+
 			return query.Progress{
 				Finished:   true,
-				Progressed: true,
+				Progressed: false,
 			}
+
 		}
 
-		return query.Progress{
-			Finished:   false,
-			Progressed: true,
-		}
 	}
 
 	return query.Progress{
@@ -1482,7 +1484,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		var r *wire.MsgCFHeaders
 		select {
 		case r = <-headerChan:
+			fmt.Println("got headerChan")
 		case err := <-errChan:
+			fmt.Println("receiveed get cfilter err")
 			switch {
 			case err == query.ErrWorkManagerShuttingDown:
 				return
@@ -1498,6 +1502,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			continue
 
 		case <-b.quit:
+			fmt.Println("cfworkmanager quit because bquit")
 			return
 		}
 
@@ -1594,8 +1599,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		if currentInterval >= uint32(len(checkpoints)) {
 			log.Infof("Successfully got filter headers "+
 				"for %d checkpoints", len(checkpoints))
+			fmt.Printf("Successfully got filter headers "+
+				"for %d checkpoints\n", len(checkpoints))
 			break
 		}
+		fmt.Println("Outof get checkpointed cfheader")
 	}
 }
 
@@ -2513,9 +2521,7 @@ func (b *blockManager) writeCheckptHeaders() {
 				continue
 			}
 			respDetails := r
-			b.writeBatchMtx.Lock()
-			delete(b.hdrTipToResponse, int32(b.headerTip))
-			b.writeBatchMtx.Unlock()
+
 			log.Debugf("Gotten tip"+
 				"Expected_height=%v, Start_height=%v, peer+%v", b.headerTip)
 
@@ -2541,6 +2547,11 @@ func (b *blockManager) writeCheckptHeaders() {
 			log.Debugf("New headertip %v", b.headerTip)
 
 			if b.headerTip <= initialHdrTip {
+
+				b.writeBatchMtx.Lock()
+				delete(b.hdrTipToResponse, int32(b.headerTip))
+				b.writeBatchMtx.Unlock()
+
 				fmt.Println("reorg issue?")
 				go b.cfg.BlkHdrQueryDispatcher.QueryOnce(
 					&query.RetryRequest{

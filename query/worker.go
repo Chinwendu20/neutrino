@@ -204,10 +204,11 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// response handler to check whether it was answering
 			// our request.
 			case resp := <-msgChan:
+				prev := job.Req
 				progress := job.HandleResp(
-					job.Req, resp, peer, job.index,
+					job.Req, resp, peer, job.index, &jobErr,
 				)
-
+				log.Debugf("prev == job.Req, %v", prev == job.Req)
 				log.Debugf("Worker %v handled msg %T while "+
 					"waiting for response to %T (job=%v). "+
 					"Finished=%v, progressed=%v, for %v",
@@ -225,16 +226,21 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					// TODO(halseth): separate progress
 					// timeout value.
 					if progress.Progressed {
-						jobUnfinished = true
-
-						break feedbackLoop
+						//jobUnfinished = true
+						//
+						//break feedbackLoop
+						timeout.Stop()
+						timeout = time.NewTimer(queryTimeout)
 					}
 					continue feedbackLoop
 				}
 
 				if !progress.Progressed {
 
-					jobErr = ErrResponseErr
+					if jobErr == nil {
+						jobUnfinished = true
+					}
+
 				}
 
 				// We did get a valid response, and can break
