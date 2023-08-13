@@ -871,7 +871,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 // handle a query for checkpointed filter headers.
 type checkpointedCFHeadersQuery struct {
 	blockMgr       *blockManager
-	msgs           []wire.Message
+	msgs           []query.ReqMessage
 	checkpoints    []*chainhash.Hash
 	stopHashes     map[chainhash.Hash]uint32
 	headerChan     chan *wire.MsgCFHeaders
@@ -892,14 +892,17 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 	return reqs
 }
 
-func cloneMsgCFHeaders(req wire.Message) wire.Message {
-	oldReq, ok := req.(*wire.MsgGetCFHeaders)
+func cloneMsgCFHeaders(req query.ReqMessage) query.ReqMessage {
+	oldReq, ok := req.(*cfhdrMsg)
 	if !ok {
 		log.Errorf("request not of type *wire.MsgCFHeaders")
 	}
-	newReq := wire.NewMsgGetCFHeaders(
-		oldReq.FilterType, oldReq.StartHeight, &oldReq.StopHash,
-	)
+	newReq := &cfhdrMsg{
+		MsgGetCFHeaders: wire.NewMsgGetCFHeaders(
+			oldReq.FilterType, oldReq.StartHeight, &oldReq.StopHash,
+		),
+		priorityIndex: oldReq.priorityIndex,
+	}
 	return newReq
 }
 func (c *checkpointedCFHeadersQuery) sendQuery(worker query.Worker,
@@ -913,7 +916,8 @@ func (c *checkpointedCFHeadersQuery) sendQuery(worker query.Worker,
 	}
 	job := task.(*query.QueryJob)
 	peer.recentReqStartTime = time.Now()
-	peer.QueueMessageWithEncoding(job.Req, nil, job.Encoding())
+	req := job.Req.(wire.Message)
+	peer.QueueMessageWithEncoding(req, nil, job.Encoding())
 
 	return nil
 
@@ -932,6 +936,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
 		// We are only looking for cfheaders messages.
+
 		return query.Progress{
 			Finished:   false,
 			Progressed: false,
@@ -947,10 +952,11 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 		}
 	}
 
-	q, ok := req.(*wire.MsgGetCFHeaders)
+	q, ok := req.(*cfhdrMsg)
 	if !ok {
 		// We sent a getcfheaders message, so that's what we should be
 		// comparing against.
+		fmt.Println("Not of request type")
 		return query.Progress{
 			Finished:   false,
 			Progressed: false,
@@ -1046,6 +1052,11 @@ type headerQuery struct {
 	startHash     chainhash.Hash
 	endHeight     int32
 	initialHash   chainhash.Hash
+	priority      float64
+}
+
+func (h *headerQuery) Priority() float64 {
+	return h.priority
 }
 
 // CheckpointedBlockHeadersQuery holds all information necessary to perform and
@@ -1070,7 +1081,7 @@ func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
 	return reqs
 }
 
-func cloneHeaderQuery(req wire.Message) wire.Message {
+func cloneHeaderQuery(req query.ReqMessage) query.ReqMessage {
 	oldReq, ok := req.(*headerQuery)
 	if !ok {
 		log.Errorf("request not of type *wire.MsgCFHeaders")
@@ -1353,6 +1364,15 @@ func (b *blockManager) batchCheckpointedBlkHeaders() {
 
 }
 
+type cfhdrMsg struct {
+	*wire.MsgGetCFHeaders
+	priorityIndex float64
+}
+
+func (c *cfhdrMsg) Priority() float64 {
+	return c.priorityIndex
+}
+
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
 // matches the checkpoints up to the tip of the store.
@@ -1388,7 +1408,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// the remaining checkpoint intervals.
 	numCheckpts := uint32(len(checkpoints)) - startingInterval
 	numQueries := (numCheckpts + maxCFCheckptsPerQuery - 1) / maxCFCheckptsPerQuery
-	queryMsgs := make([]wire.Message, 0, numQueries)
+	queryMsgs := make([]query.ReqMessage, 0, numQueries)
 
 	// We'll also create an additional set of maps that we'll use to
 	// re-order the responses as we get them in.
@@ -1433,9 +1453,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 		// Once we have the stop hash, we can construct the query
 		// message itself.
-		queryMsg := wire.NewMsgGetCFHeaders(
-			fType, startHeightRange, &stopHash,
-		)
+
+		queryMsg := &cfhdrMsg{
+			MsgGetCFHeaders: wire.NewMsgGetCFHeaders(
+				fType, startHeightRange, &stopHash,
+			),
+		}
 
 		// We'll mark that the ith interval is queried by this message,
 		// and also map the stop hash back to the index of this message.
@@ -2566,10 +2589,10 @@ func (b *blockManager) writeCheckptHeaders() {
 				b.writeBatchMtx.Unlock()
 
 				fmt.Println("reorg issue?")
-				go b.cfg.BlkHdrQueryDispatcher.QueryOnce(
-					&query.RetryRequest{
-						Index: respDetails.index,
-						NewReq: &headerQuery{
+				q := CheckpointedBlockHeadersQuery{
+					blockMgr: b,
+					msgs: []*headerQuery{
+						{
 							Message: &wire.MsgGetHeaders{
 								BlockLocatorHashes: []*chainhash.Hash{&newHdrTipHash},
 								HashStop:           *b.nextCheckpoint.Hash,
@@ -2579,8 +2602,13 @@ func (b *blockManager) writeCheckptHeaders() {
 							startHash:     newHdrTipHash,
 							endHeight:     b.nextCheckpoint.Height,
 							initialHash:   newHdrTipHash,
+							priority:      0.5,
 						},
 					},
+				}
+
+				go b.cfg.BlkHdrQueryDispatcher.QueryBatch(
+					q.requests(), query.Cancel(b.quit), query.ErrChan(nil), query.NoTimeout(),
 				)
 
 				log.Debugf("Created new job from writecheckpt loop"+

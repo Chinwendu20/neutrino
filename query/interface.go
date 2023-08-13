@@ -113,7 +113,7 @@ type Progress struct {
 // connected peers.
 type Request struct {
 	// Req is the message request to send.
-	Req wire.Message
+	Req ReqMessage
 
 	// HandleResp is a response handler that will be called for every
 	// message received from the peer that the request was made to. It
@@ -129,12 +129,17 @@ type Request struct {
 	HandleResp func(req, resp wire.Message, peer Peer, index float64, err *error) Progress
 
 	SendQuery func(worker Worker, job Task) error
-	CloneReq  func(wire.Message) wire.Message
+	CloneReq  func(ReqMessage) ReqMessage
 }
 
 type RetryRequest struct {
 	Index  float64
 	NewReq wire.Message
+}
+
+type ReqMessage interface {
+	wire.Message
+	Priority() float64
 }
 
 // Dispatcher is an interface defining the API for dispatching queries to
@@ -145,8 +150,6 @@ type Dispatcher interface {
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Request.
 	QueryBatch(reqs []*Request, options ...QueryOption) chan error
-
-	QueryOnce(reqs *RetryRequest)
 }
 
 // Peer is the interface that defines the methods needed by the query package

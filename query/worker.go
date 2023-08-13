@@ -172,6 +172,8 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 		default:
 			log.Debugf("%v Worker %v queuing job %T with index %v for %v",
 				w.debugName, peer.Addr(), job.Req, job.Index())
+			fmt.Printf("%v Worker %v queuing job %T with index %v for %v\n",
+				w.debugName, peer.Addr(), job.Req, job.Index())
 
 			err := job.SendQuery(w, job)
 			if err != nil {
@@ -209,9 +211,9 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					job.Req, resp, peer, job.index, &jobErr,
 				)
 				log.Debugf("prev == job.Req, %v", prev == job.Req)
-				log.Debugf("Worker %v handled msg %T while "+
+				fmt.Printf("Worker %v handled msg %T while "+
 					"waiting for response to %T (job=%v). "+
-					"Finished=%v, progressed=%v, for %v",
+					"Finished=%v, progressed=%v, for %v\n",
 					peer.Addr(), resp, job.Req, job.Index(),
 					progress.Finished, progress.Progressed, w.debugName)
 
