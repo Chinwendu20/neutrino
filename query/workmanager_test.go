@@ -11,13 +11,13 @@ import (
 
 type mockWorker struct {
 	peer    Peer
-	nextJob chan *queryJob
+	nextJob chan *QueryJob
 	results chan *jobResult
 }
 
 var _ Worker = (*mockWorker)(nil)
 
-func (m *mockWorker) NewJob() chan<- *queryJob {
+func (m *mockWorker) NewJob() chan<- *QueryJob {
 	return m.nextJob
 }
 
@@ -80,7 +80,7 @@ func startWorkManager(t *testing.T, numWorkers int) (WorkManager,
 		NewWorker: func(peer Peer) Worker {
 			m := &mockWorker{
 				peer:    peer,
-				nextJob: make(chan *queryJob),
+				nextJob: make(chan *QueryJob),
 				results: make(chan *jobResult),
 			}
 			workerChan <- m
@@ -142,7 +142,7 @@ func TestWorkManagerWorkDispatcherSingleWorker(t *testing.T) {
 	// Each query should be sent on the nextJob queue, in the order they
 	// had in their batch.
 	for i := uint64(0); i < numQueries; i++ {
-		var job *queryJob
+		var job *QueryJob
 		select {
 		case job = <-wk.nextJob:
 			if job.index != i {
@@ -192,7 +192,7 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 	// assigned the job.
 	type sched struct {
 		wk  *mockWorker
-		job *queryJob
+		job *QueryJob
 	}
 
 	// Schedule a batch of queries.
@@ -319,7 +319,7 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 
 	// Respond with a result to half of the queries.
 	for i := 0; i < numQueries/2; i++ {
-		var job *queryJob
+		var job *QueryJob
 		select {
 		case job = <-wk.nextJob:
 		case <-errChan:
@@ -346,7 +346,7 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 
 	// All remaining queries should be canceled.
 	for i := 0; i < numQueries/2; i++ {
-		var job *queryJob
+		var job *QueryJob
 		select {
 		case job = <-wk.nextJob:
 		case <-time.After(time.Second):
@@ -407,7 +407,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 	errChan := wm.Query(queries)
 
 	// The 4 first workers should get the job.
-	var jobs []*queryJob
+	var jobs []*QueryJob
 	for i := 0; i < numQueries; i++ {
 		select {
 		case job := <-workers[i].nextJob:

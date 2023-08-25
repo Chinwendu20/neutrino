@@ -43,6 +43,9 @@ type queryOptions struct {
 	// that a query can be retried. If this is set then numRetries has no
 	// effect.
 	noRetryMax bool
+	keepBatch  bool
+	noTimeout  bool
+	errChan    chan error
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -67,6 +70,12 @@ func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	}
 }
 
+func NoTimeout() QueryOption {
+	return func(qo *queryOptions) {
+		qo.noTimeout = true
+	}
+}
+
 // NumRetries is a query option that specifies the number of times a query
 // should be retried.
 func NumRetries(num uint8) QueryOption {
@@ -75,11 +84,23 @@ func NumRetries(num uint8) QueryOption {
 	}
 }
 
+func KeepBatch() QueryOption {
+	return func(qo *queryOptions) {
+		qo.keepBatch = true
+	}
+}
+
 // NoRetryMax is a query option that can be used to disable the cap on the
 // number of retries. If this is set then NumRetries has no effect.
 func NoRetryMax() QueryOption {
 	return func(qo *queryOptions) {
 		qo.noRetryMax = true
+	}
+}
+
+func ErrChan(error chan error) QueryOption {
+	return func(qo *queryOptions) {
+		qo.errChan = error
 	}
 }
 
@@ -125,7 +146,7 @@ type Progress struct {
 // connected peers.
 type Request struct {
 	// Req is the message request to send.
-	Req wire.Message
+	Req *ReqMessage
 
 	// HandleResp is a response handler that will be called for every
 	// message received from the peer that the request was made to. It
@@ -138,7 +159,14 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peer string) Progress
+	HandleResp func(req, resp wire.Message, peer Peer, jobErr *error) Progress
+	SendQuery  func(worker Worker, job Task) error
+	CloneReq   func(message ReqMessage) *ReqMessage
+}
+
+type ReqMessage struct {
+	wire.Message
+	PriorityIndex float64
 }
 
 // WorkManager defines an API for a manager that dispatches queries to bitcoin
@@ -184,4 +212,12 @@ type Peer interface {
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
 	OnDisconnect() <-chan struct{}
+
+	LastReqDuration() time.Duration
+
+	UpdateRequestDuration()
+
+	IsPeerBehindStartHeight(req wire.Message) bool
+
+	IsSyncCandidate() bool
 }

@@ -177,22 +177,36 @@ type ServerPeer struct {
 	// can't accept will be dropped silently.
 	// TODO(halseth): remove one of the maps when all queries go through
 	// work manager.
-	recvSubscribers  map[spMsgSubscription]struct{}
-	recvSubscribers2 map[msgSubscription]struct{}
-	mtxSubscribers   sync.RWMutex
+	recvSubscribers    map[spMsgSubscription]struct{}
+	recvSubscribers2   map[msgSubscription]struct{}
+	mtxSubscribers     sync.RWMutex
+	recentReqDuration  time.Duration
+	recentReqStartTime time.Time
 }
 
 // NewServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:           s,
-		persistent:       isPersistent,
-		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
-		quit:             make(chan struct{}),
-		recvSubscribers:  make(map[spMsgSubscription]struct{}),
-		recvSubscribers2: make(map[msgSubscription]struct{}),
+		server:            s,
+		persistent:        isPersistent,
+		knownAddresses:    lru.NewCache[string, *cachedAddr](5000),
+		quit:              make(chan struct{}),
+		recvSubscribers:   make(map[spMsgSubscription]struct{}),
+		recvSubscribers2:  make(map[msgSubscription]struct{}),
+		recentReqDuration: 2 * time.Second,
 	}
+}
+
+func (sp *ServerPeer) LastReqDuration() time.Duration {
+	return sp.recentReqDuration
+}
+
+func (sp *ServerPeer) UpdateRequestDuration() {
+
+	duration := time.Since(sp.recentReqStartTime)
+	sp.recentReqDuration = duration
+	log.Debugf("peer=%v, updated duration to=%v", sp.Addr(), duration.Seconds())
 }
 
 // newestBlock returns the current best block hash and height using the format
@@ -742,6 +756,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		ConnectedPeers: s.ConnectedPeers,
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
+		OrderPeers:     query.OrderPeers,
+		DebugName:      "GeneralWorkDispatcher",
 	})
 
 	var err error
@@ -800,15 +816,24 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
-		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
-		QueryDispatcher:  s.workManager,
-		BanPeer:          s.BanPeer,
-		GetBlock:         s.GetBlock,
-		firstPeerSignal:  s.firstPeerConnect,
-		queryAllPeers:    s.queryAllPeers,
+		ChainParams:            s.chainParams,
+		BlockHeaders:           s.BlockHeaders,
+		RegFilterHeaders:       s.RegFilterHeaders,
+		TimeSource:             s.timeSource,
+		GeneralQueryDispatcher: s.workManager,
+		BanPeer:                s.BanPeer,
+		GetBlock:               s.GetBlock,
+		firstPeerSignal:        s.firstPeerConnect,
+		queryAllPeers:          s.queryAllPeers,
+		peerByAddr:             s.PeerByAddr,
+		checkptHdrQueryDispatcher: query.NewWorkManager(&query.Config{
+			ConnectedPeers:       s.ConnectedPeers,
+			NewWorker:            query.NewWorker,
+			Ranking:              query.NewPeerRanking(),
+			OrderPeers:           query.OrderPeers,
+			IsEligibleWorkerFunc: query.IsWorkerEligibleForBlkHdrFetch,
+			DebugName:            "BlockHdrWorkDispatcher",
+		}),
 	})
 	if err != nil {
 		return nil, err
@@ -1112,6 +1137,36 @@ func (s *ChainService) AddPeer(sp *ServerPeer) {
 	case <-s.quit:
 		return
 	}
+}
+
+// IsSyncCandidate returns whether or not the peer is a candidate to consider
+// syncing from.
+func (sp *ServerPeer) IsSyncCandidate() bool {
+	// The peer is not a candidate for sync if it's not a full node.
+	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
+}
+
+// IsPeerBehindStartHeight returns a boolean indicating if the peer's last block height
+// is behind the start height of the request. If the peer is not behind the request start
+// height false is returned, otherwise, true is.
+func (sp *ServerPeer) IsPeerBehindStartHeight(req wire.Message) bool {
+
+	queryGetHeaders, ok := req.(*headerQuery)
+
+	if !ok {
+		log.Debugf("request is not type headerQuery")
+
+		return true
+	}
+
+	if sp.LastBlock() < queryGetHeaders.startHeight {
+
+		return true
+
+	}
+
+	return false
+
 }
 
 // AddBytesSent adds the passed number of bytes to the total bytes sent counter
@@ -1609,6 +1664,9 @@ func (s *ChainService) Start() error {
 	// needed by peers.
 	s.addrManager.Start()
 	s.blockManager.Start()
+	if err := s.blockManager.cfg.checkptHdrQueryDispatcher.Start(); err != nil {
+		return fmt.Errorf("unable to start block header work manager: %v", err)
+	}
 	s.blockSubscriptionMgr.Start()
 	if err := s.workManager.Start(); err != nil {
 		return fmt.Errorf("unable to start work manager: %v", err)

@@ -439,16 +439,33 @@ func (q *cfiltersQuery) request() *query.Request {
 		q.filterType, uint32(q.startHeight), q.stopHash,
 	)
 
+	queryMsg := query.ReqMessage{
+		Message: msg,
+	}
 	return &query.Request{
-		Req:        msg,
+		Req:        &queryMsg,
 		HandleResp: q.handleResponse,
+		SendQuery:  sendQuery,
+		CloneReq: func(req query.ReqMessage) *query.ReqMessage {
+			oldReq, ok := req.Message.(*wire.MsgGetCFilters)
+			if !ok {
+				log.Errorf("request not of type *wire.MsgCFHeaders")
+			}
+			newReq := &query.ReqMessage{
+				Message: wire.NewMsgGetCFilters(
+					oldReq.FilterType, oldReq.StartHeight, &oldReq.StopHash,
+				),
+				PriorityIndex: req.PriorityIndex,
+			}
+			return newReq
+		},
 	}
 }
 
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
 func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+	peer query.Peer, _ *error) query.Progress {
 
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
@@ -462,6 +479,9 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 		return noProgress
 	}
 
+	if peer != nil {
+		peer.UpdateRequestDuration()
+	}
 	// If the request filter type doesn't match the type we were expecting,
 	// ignore this message.
 	if q.filterType != request.FilterType {
@@ -691,6 +711,7 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter,
 	error) {
+	log.Debugf("Getting CFilter...")
 
 	// The only supported filter atm is the regular filter, so we'll reject
 	// all other filters.
@@ -759,6 +780,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		query.Cancel(s.quit),
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	errChan := s.workManager.Query(
@@ -774,6 +796,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	case <-s.quit:
 		return nil, ErrShuttingDown
 	}
+
+	log.Debugf("Gotten CFilter...%v", err)
 
 	// If there are elements left to receive, the query failed.
 	if len(filterQuery.headerIndex) > 0 {
@@ -798,6 +822,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 // returned immediately.
 func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+	fmt.Println("Getting block....")
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block so we
@@ -834,12 +859,17 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	getData := wire.NewMsgGetData()
 	_ = getData.AddInvVect(inv)
 
+	msg := query.ReqMessage{
+		Message: getData,
+	}
 	var foundBlock *btcutil.Block
 
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(req, resp wire.Message, sp query.Peer, _ *error) query.Progress {
+
+		peer := sp.Addr()
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {
@@ -852,6 +882,9 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 			return noProgress
 		}
 
+		if sp != nil {
+			sp.UpdateRequestDuration()
+		}
 		// If this isn't the block we asked for, ignore it.
 		if response.BlockHash() != blockHash {
 			return noProgress
@@ -912,8 +945,20 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 	// Prepare the query request.
 	request := &query.Request{
-		Req:        getData,
+		Req:        &msg,
 		HandleResp: handleResp,
+		SendQuery:  sendQuery,
+		CloneReq: func(req query.ReqMessage) *query.ReqMessage {
+			newMsg := wire.NewMsgGetData()
+			_ = newMsg.AddInvVect(inv)
+
+			newReq := &query.ReqMessage{
+				Message:       newMsg,
+				PriorityIndex: req.PriorityIndex,
+			}
+
+			return newReq
+		},
 	}
 
 	// Prepare the query options.
@@ -921,10 +966,14 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
 		query.Cancel(s.quit),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	// Send the request to the work manager and await a response.
+	fmt.Println("Sending query for block")
 	errChan := s.workManager.Query([]*query.Request{request}, queryOpts...)
+	log.Debug("Waiting for errChan in getblock")
+	fmt.Println("Waiting for errChan in getblock")
 	select {
 	case err := <-errChan:
 		if err != nil {
@@ -934,7 +983,10 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		return nil, ErrShuttingDown
 	}
 
+	log.Debugf("Gotten block, %v", err)
 	if foundBlock == nil {
+		log.Debugf("couldn't retrieve block %s from "+
+			"network", blockHash)
 		return nil, fmt.Errorf("couldn't retrieve block %s from "+
 			"network", blockHash)
 	}
