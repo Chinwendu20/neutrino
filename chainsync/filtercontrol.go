@@ -69,6 +69,20 @@ func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
 	return nil
 }
 
+func FetchHardCodedFilterHeaderCheckpts(net wire.BitcoinNet) map[uint32]*chainhash.Hash {
+
+	return filterHeaderCheckpoints[net]
+}
+
+func FetchHardCodedFilterHdrCheckptHeight(net wire.BitcoinNet) []uint32 {
+	heights := make([]uint32, len(filterHeaderCheckpoints[net]))
+
+	for height, _ := range filterHeaderCheckpoints[net] {
+		heights = append(heights, height)
+	}
+	return heights
+}
+
 // hashFromStr makes a chainhash.Hash from a valid hex string. If the string is
 // invalid, a nil pointer will be returned.
 func hashFromStr(hexStr string) *chainhash.Hash {
