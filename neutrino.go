@@ -6,6 +6,9 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"github.com/lightninglabs/neutrino/chaindataloader"
+	"github.com/lightninglabs/neutrino/headerlist"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -85,6 +88,23 @@ var (
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
+
+const (
+	sideloadDataChunkSize int32 = 2000
+)
+
+// SideLoadOpt defines the config required to sideload headers into the DB.
+type SideLoadOpt struct {
+	// SkipVerify indicates if we are to run verification on the headers from the
+	// blkHdrSideLoad source.
+	SkipVerify bool
+
+	// Reader is the sideload source.
+	Reader io.ReadSeeker
+
+	// SourceType indicates the format of a sideload source.
+	SourceType chaindataloader.SourceType
+}
 
 // isDevNetwork indicates if the chain is a private development network, namely
 // simnet or regtest/regnet.
@@ -618,6 +638,8 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+	BlkHdrSideloader *SideLoadOpt
+	CfHdrSideloader  *SideLoadOpt
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -678,6 +700,9 @@ type ChainService struct { // nolint:maligned
 	dialer       func(net.Addr) (net.Conn, error)
 
 	broadcastTimeout time.Duration
+
+	blkHdrSideloader *sideloader
+	cfHdrSideloader  *sideloader
 }
 
 // NewChainService returns a new chain service configured to connect to the
@@ -799,22 +824,60 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
-		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
+	targetTimespan := int64(s.chainParams.TargetTimespan / time.Second)
+	targetTimePerBlock := int64(s.chainParams.TargetTimePerBlock / time.Second)
+	adjustmentFactor := s.chainParams.RetargetAdjustmentFactor
+
+	hdrProcessor := &blkHdrProcessor{
+		store:               s.BlockHeaders,
+		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
+		minRetargetTimespan: targetTimespan / adjustmentFactor,
+		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		timeSource:          s.timeSource,
+		chainParams:         s.chainParams,
+		headerList: headerlist.NewBoundedMemoryChain(
+			numMaxMemHeaders,
+		),
+	}
+
+	blkMgrConfig := &blockManagerCfg{
+		blkHdrProcessor:  hdrProcessor,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
-	})
+		RegFilterHeaders: s.RegFilterHeaders,
+	}
+
+	bm, err := newBlockManager(blkMgrConfig)
 	if err != nil {
 		return nil, err
 	}
 	s.blockManager = bm
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
+
+	sideload := &sideloader{}
+	if cfg.BlkHdrSideloader != nil {
+		sideload, err = prepBlkHdrSideload(cfg.BlkHdrSideloader, hdrProcessor,
+			sideload)
+
+		if err != nil {
+			return nil, err
+		}
+
+		s.blkHdrSideloader = sideload
+	}
+
+	if cfg.CfHdrSideloader != nil {
+		sideload, err = prepFilterHdrSideload(cfg.CfHdrSideloader, sideload)
+
+		if err != nil {
+			return nil, err
+		}
+
+		s.blkHdrSideloader = sideload
+	}
 
 	// Only setup a function to return new addresses to connect to when not
 	// running in connect-only mode.  Private development networks are always in
@@ -1605,6 +1668,29 @@ func (s *ChainService) Start() error {
 		return nil
 	}
 
+	// Preferably sideload blockheaders before filterheaders
+	if s.blkHdrSideloader != nil {
+		log.Debugf("Sideloading block headers")
+		err := s.blkHdrSideloader.sideLoadHeaders(s.blkHdrSideloader.
+			blkHdrCurHeight,
+			s.blkHdrSideloader.blkHdrProcessor.nextCheckpt.Height)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	if s.cfHdrSideloader != nil {
+		log.Debugf("Sideloading filter headers")
+		err := s.cfHdrSideloader.sideLoadHeaders(s.cfHdrSideloader.
+			fHdrCurHeight,
+			s.cfHdrSideloader.fHdrNextCheckptHeight)
+		if err != nil {
+			return err
+		}
+
+	}
+
 	// Start the address manager and block manager, both of which are
 	// needed by peers.
 	s.addrManager.Start()
@@ -1759,6 +1845,537 @@ func (o *onionAddr) String() string {
 // Network returns "onion".
 func (o *onionAddr) Network() string {
 	return "onion"
+}
+
+func (h *sideloader) processSideLoadBlockHeader(headers []*wire.
+	BlockHeader) (*chaindataloader.ProcessHdrResp, error) {
+
+	headersArray := make([]headerfs.BlockHeader, 0, len(headers))
+	fmt.Println("length of headers")
+	fmt.Println(len(headers))
+	var (
+		finalHeight          int32
+		nextCheckpointHeight int32
+	)
+	for _, header := range headers {
+		var (
+			node     *headerlist.Node
+			prevNode *headerlist.Node
+		)
+		// Ensure there is a previous header to compare against.
+		prevNodeEl := h.blkHdrProcessor.headerList.Back()
+		if prevNodeEl == nil {
+			log.Warnf("side load - Header list does not contain a " +
+				"previous element as expected -- exiting side load")
+
+			return nil, nil
+		}
+
+		node = &headerlist.Node{Header: *header}
+		prevNode = prevNodeEl
+		node.Height = prevNode.Height + 1
+
+		if !h.skipVerify {
+
+			valid, err := h.blkHdrProcessor.verifyBlockHeader(header, *prevNode)
+			if err != nil || !valid {
+				log.Debugf("Side Load- Did not pass verification at "+
+					"height %v-- ", node.Height)
+
+				// return error
+				return nil, nil
+			}
+
+			// Verify checkpoint only if verification is enabled.
+			if h.blkHdrProcessor.nextCheckpt != nil &&
+				node.Height == h.blkHdrProcessor.nextCheckpt.Height {
+
+				nodeHash := node.Header.BlockHash()
+				if nodeHash.IsEqual(h.blkHdrProcessor.nextCheckpt.Hash) {
+					// Update nextCheckpoint  to give more accurate info
+					// about tip of DB.
+					h.blkHdrProcessor.nextCheckpt = h.blkHdrProcessor.
+						findNextHeaderCheckpoint(node.Height)
+
+					log.Infof("Verified downloaded block "+
+						"header against checkpoint at height "+
+						"%d/hash %s", node.Height, nodeHash)
+				} else {
+					log.Warnf("Error at checkpoint while side loading "+
+						"headers, exiting at height %d, hash %s",
+						node.Height, nodeHash)
+					return nil, nil
+				}
+			}
+		}
+
+		// convert header to  headerfs.Blockheader and add to an  array.
+		headersArray = append(headersArray, headerfs.BlockHeader{
+			BlockHeader: header,
+			Height:      uint32(node.Height),
+		})
+		h.blkHdrProcessor.headerList.PushBack(*node)
+		finalHeight = node.Height
+		nextCheckpointHeight = h.blkHdrProcessor.nextCheckpt.Height
+	}
+
+	// handle error
+	err := h.blkHdrProcessor.store.WriteHeaders(headersArray...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &chaindataloader.ProcessHdrResp{
+		CurHeight:         finalHeight,
+		NextCheckptHeight: nextCheckpointHeight,
+	}, nil
+}
+
+type blkHdrProcessor struct {
+	minRetargetTimespan int64 // target timespan / adjustment factor
+	maxRetargetTimespan int64 // target timespan * adjustment factor
+	blocksPerRetarget   int32 // target timespan / target time per block
+	// timeSource is used to access a time estimate based on the clocks of
+	// the connected peers.
+	timeSource  blockchain.MedianTimeSource
+	chainParams chaincfg.Params
+	nextCheckpt *chaincfg.Checkpoint
+	store       headerfs.BlockHeaderStore
+	headerList  headerlist.Chain
+}
+
+func writeCfHeaders(msg *wire.MsgCFHeaders, filterHdrStore *headerfs.
+	FilterHeaderStore, blkHdrStore headerfs.BlockHeaderStore) (*chainhash.Hash,
+	uint32, []wire.BlockHeader, error) {
+	// Check that the PrevFilterHeader is the same as the last stored so we
+	// can prevent misalignment.
+	tip, tipHeight, err := filterHdrStore.ChainTip()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if *tip != msg.PrevFilterHeader {
+		return nil, 0, nil, fmt.Errorf("attempt to write cfheaders out of "+
+			"order, tip=%v (height=%v), prev_hash=%v", *tip,
+			tipHeight, msg.PrevFilterHeader)
+	}
+
+	// Cycle through the headers and compute each header based on the prev
+	// header and the filter hash from the cfheaders response entries.
+	lastHeader := msg.PrevFilterHeader
+	headerBatch := make([]headerfs.FilterHeader, 0, len(msg.FilterHashes))
+	for _, hash := range msg.FilterHashes {
+		// header = dsha256(filterHash || prevHeader)
+		lastHeader = chainhash.DoubleHashH(
+			append(hash[:], lastHeader[:]...),
+		)
+
+		headerBatch = append(headerBatch, headerfs.FilterHeader{
+			FilterHash: lastHeader,
+		})
+	}
+
+	numHeaders := len(headerBatch)
+
+	// We'll now query for the set of block headers which match each of
+	// these filters headers in their corresponding chains. Our query will
+	// return the headers for the entire checkpoint interval ending at the
+	// designated stop hash.
+	matchingBlockHeaders, startHeight, err := blkHdrStore.FetchHeaderAncestors(
+		uint32(numHeaders-1), &msg.StopHash,
+	)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	// The final height in our range will be offset to the end of this
+	// particular checkpoint interval.
+	lastHeight := startHeight + uint32(numHeaders) - 1
+	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
+	lastHash := lastBlockHeader.BlockHash()
+
+	// We only need to set the height and hash of the very last filter
+	// header in the range to ensure that the index properly updates the
+	// tip of the chain.
+	headerBatch[numHeaders-1].HeaderHash = lastHash
+	headerBatch[numHeaders-1].Height = lastHeight
+
+	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
+		"new_tip=%v", lastHeight, lastHash, lastHeader)
+
+	// Write the header batch.
+	err = filterHdrStore.WriteHeaders(headerBatch...)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	return &lastHeader, startHeight, matchingBlockHeaders, nil
+}
+
+func (h *sideloader) processSideloadedCfHeader(
+	headers []*chainhash.Hash) (*chaindataloader.ProcessHdrResp, error) {
+
+	msgCfHeader := &wire.MsgCFHeaders{
+		FilterType:       filterType,
+		StopHash:         *headers[len(headers)-1],
+		PrevFilterHeader: *h.fHdrCurHash,
+		FilterHashes:     headers,
+	}
+
+	if !h.skipVerify {
+
+		if !verifyCheckpoint(h.fHdrCurHash, headers[len(headers)-1],
+			msgCfHeader) {
+
+			log.Warnf("Filter headers failed verification at height  - %v",
+				h.fHdrNextCheckpointIdx)
+			return nil, nil
+		}
+		h.fHdrNextCheckpointIdx = h.fHdrNextCheckpointIdx + 1
+		h.fHdrNextCheckptHeight = int32(h.filterCheckptHeights[h.fHdrNextCheckpointIdx])
+
+	}
+
+	_, _, _, err := writeCfHeaders(msgCfHeader, h.fHdrStore,
+		h.blkHdrProcessor.store)
+
+	if err != nil {
+		return nil, err
+	}
+
+	h.fHdrCurHash = headers[len(headers)-1]
+	h.fHdrCurHeight = h.fHdrCurHeight + int32(len(headers))
+
+	if h.fHdrCurHeight > int32(h.fHdrLastHeight) {
+		log.Debugf("Completed filter header sideloading at height %v",
+			h.fHdrLastHeight)
+		return nil, nil
+	}
+
+	return &chaindataloader.ProcessHdrResp{
+		CurHeight:         h.fHdrCurHeight,
+		NextCheckptHeight: h.fHdrNextCheckptHeight,
+	}, nil
+}
+
+// checkHeaderSanity performs contextual and context-less checks on the passed
+// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
+// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
+// checks.
+func (h *blkHdrProcessor) checkHeaderSanity(blockHeader *wire.
+	BlockHeader, prevNodeHeight int32,
+	prevNodeHeader *wire.BlockHeader, hList headerlist.Chain) error {
+
+	parentHeaderCtx := newLightHeaderCtx(
+		prevNodeHeight, prevNodeHeader, h.store, hList,
+	)
+
+	// Create a lightChainCtx as well.
+	chainCtx := newLightChainCtx(
+		&h.chainParams, h.blocksPerRetarget, h.minRetargetTimespan,
+		h.maxRetargetTimespan,
+	)
+
+	var emptyFlags blockchain.BehaviorFlags
+	err := blockchain.CheckBlockHeaderContext(
+		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	return blockchain.CheckBlockHeaderSanity(
+		blockHeader, h.chainParams.PowLimit, h.timeSource,
+		emptyFlags,
+	)
+}
+
+// verifyBlockHeader verifies blockheader by checking if it connects to the previous block and its block header sanity.
+func (h *blkHdrProcessor) verifyBlockHeader(blockHeader *wire.BlockHeader,
+	prevNode headerlist.Node) (bool, error) {
+	prevNodeHeader := prevNode.Header
+	prevHash := prevNode.Header.BlockHash()
+	prevNodeHeight := prevNode.Height
+
+	if prevHash.IsEqual(&blockHeader.PrevBlock) {
+		err := h.checkHeaderSanity(blockHeader,
+			prevNodeHeight, &prevNodeHeader, h.headerList)
+
+		if err != nil {
+			return true, fmt.Errorf("did not pass sanity check: %w", err)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// findNextHeaderCheckpoint returns the next checkpoint after the passed height.
+// It returns nil when there is not one either because the height is already
+// later than the final checkpoint or there are none for the current network.
+func (h *blkHdrProcessor) findNextHeaderCheckpoint(height int32) *chaincfg.
+	Checkpoint {
+	// There is no next checkpoint if there are none for this current
+	// network.
+	checkpoints := h.chainParams.Checkpoints
+	if len(checkpoints) == 0 {
+		return nil
+	}
+
+	// There is no next checkpoint if the height is already after the final
+	// checkpoint.
+	finalCheckpoint := &checkpoints[len(checkpoints)-1]
+	if height >= finalCheckpoint.Height {
+		return nil
+	}
+
+	// Find the next checkpoint.
+	nextCheckpoint := finalCheckpoint
+	for i := len(checkpoints) - 2; i >= 0; i-- {
+		if height >= checkpoints[i].Height {
+			break
+		}
+		nextCheckpoint = &checkpoints[i]
+	}
+	return nextCheckpoint
+}
+
+func prepBlkHdrSideload(c *SideLoadOpt,
+	hdrProcessor *blkHdrProcessor, s *sideloader) (*sideloader, error) {
+
+	s.blkHdrProcessor = hdrProcessor
+
+	reader, err := chaindataloader.NewBlockHeaderReader(&chaindataloader.
+		BlkHdrReaderConfig{
+		ReaderConfig: chaindataloader.ReaderConfig{
+			SourceType: c.SourceType,
+			Reader:     c.Reader,
+		},
+		ProcessBlkHeader: s.processSideLoadBlockHeader,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// If headers contained in the side load source are for a different chain
+	// network return immediately.
+	if reader.HeadersChain() != hdrProcessor.chainParams.Net {
+		log.Errorf("headers from side load file are of network %v "+
+			"and not %v as expected"+
+			"-- skipping side loading", reader.HeadersChain(), hdrProcessor.
+			chainParams.Net)
+
+		return nil, nil
+	}
+
+	// Initialize the next checkpoint based on the current tipHeight.
+	tipHeader, tipHeight, err := hdrProcessor.store.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	if !s.skipVerify {
+		nextCheckpt := hdrProcessor.findNextHeaderCheckpoint(int32(tipHeight))
+
+		if nextCheckpt == nil {
+			log.Debugf("block header tip already past checkpoint cannot" +
+				" verify sideload, set skipVerify to true if you want to " +
+				"sideload anyway ---exiting sideload")
+
+			return nil, nil
+		}
+
+		if reader.EndHeight() < uint32(nextCheckpt.Height) {
+			log.Debugf("sideload endHeight, %v less than next checkpoint "+
+				"tipHeight, %v cannot verify sideload, "+
+				"set skipVerify to true if you "+
+				"want to sideload anyway ---exiting sideload",
+				reader.EndHeight(), nextCheckpt.Height)
+
+			return nil, nil
+		}
+		s.blkHdrProcessor.nextCheckpt = nextCheckpt
+		s.blkHdrCurHeight = int32(tipHeight)
+	}
+	fmt.Println(reader.StartHeight())
+	fmt.Println(tipHeight)
+	if reader.EndHeight() <= tipHeight || reader.StartHeight() > tipHeight {
+
+		//	Log error!!!!!!!!!!!!
+		log.Debug("Error while looadingstart tipHeight and end tipHeight")
+		return nil, nil
+
+	}
+
+	s.blkHdrProcessor.headerList.ResetHeaderState(headerlist.Node{
+		Header: *tipHeader,
+		Height: int32(tipHeight),
+	})
+	s.reader = reader
+	fmt.Println("Done prepping blkheader ")
+	return s, err
+}
+
+func prepFilterHdrSideload(c *SideLoadOpt, s *sideloader) (*sideloader, error) {
+
+	fTipHash, fTip, err := s.fHdrStore.ChainTip()
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize the next checkpoint based on the current blkTip.
+	_, blkTip, err := s.blkHdrProcessor.store.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter headers should not be fetched beyond the block header's tip.
+	s.fHdrLastHeight = blkTip
+	s.fHdrCurHeight = int32(fTip)
+	s.fHdrCurHash = fTipHash
+
+	var nextCheckptHeight uint32
+
+	if !s.skipVerify {
+
+		var finalNextCheckptHeight uint32
+		for i := 0; i < len(s.filterCheckptHeights); i++ {
+
+			if s.filterCheckptHeights[i] > blkTip {
+				break
+			}
+			finalNextCheckptHeight = s.filterCheckptHeights[i]
+
+		}
+
+		s.fHdrLastHeight = finalNextCheckptHeight
+
+		if finalNextCheckptHeight == 0 {
+			log.Debug("block header tip less than the least filter " +
+				"check point blkTip, cannot sideload filter")
+			return nil, nil
+		}
+
+		var nextCheckptIdx int
+		for i := 0; i < len(s.filterCheckptHeights); i++ {
+
+			if s.filterCheckptHeights[i] > fTip {
+				nextCheckptIdx = i
+				nextCheckptHeight = s.filterCheckptHeights[i]
+				break
+			}
+		}
+
+		if nextCheckptHeight == 0 {
+			log.Debug("filter tip is already past checkpoint, " +
+				"cannot verify and sideload")
+			return nil, nil
+		}
+
+		s.fHdrNextCheckpointIdx = nextCheckptIdx
+		s.fHdrNextCheckptHeight = int32(nextCheckptHeight)
+
+	}
+
+	if fTip >= s.fHdrLastHeight {
+		log.Debug("filter tip is greater than or equal to the last header " +
+			"tip for fetch no need to update filter header store -- skipping" +
+			" sideload")
+		return nil, nil
+	}
+
+	reader, err := chaindataloader.NewFilterHeaderReader(&chaindataloader.
+		FilterHdrReaderConfig{
+		ReaderConfig: chaindataloader.ReaderConfig{
+			SourceType: c.SourceType,
+			Reader:     c.Reader,
+		},
+		ProcessCfHeader: s.processSideloadedCfHeader,
+		FilterType:      filterType,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// If headers contained in the side load source are for a different chain
+	// network return immediately.
+	if s.reader.HeadersChain() != s.blkHdrProcessor.chainParams.Net {
+		log.Error("headers from side load file are of network %v "+
+			"and so incompatible with neutrino's current bitcoin network "+
+			"-- skipping side loading", s.reader.HeadersChain())
+
+		return nil, nil
+	}
+
+	if reader.EndHeight() <= fTip || (!s.skipVerify &&
+		reader.EndHeight() < nextCheckptHeight) || reader.StartHeight() > fTip {
+
+		//	Log error!!!!!!!!!!!!
+		return nil, nil
+
+	}
+
+	s.reader = reader
+
+	return s, nil
+}
+
+type sideloader struct {
+	reader                chaindataloader.Reader
+	blkHdrProcessor       *blkHdrProcessor
+	skipVerify            bool
+	fHdrNextCheckpointIdx int
+	fHdrStore             *headerfs.FilterHeaderStore
+	filterCheckpoints     map[uint32]*chainhash.Hash
+	filterCheckptHeights  []uint32
+	blkHdrCurHeight       int32
+	fHdrCurHeight         int32
+	fHdrCurHash           *chainhash.Hash
+	fHdrNextCheckptHeight int32
+	fHdrLastHeight        uint32
+}
+
+func (s *sideloader) sideLoadHeaders(curHeight, nextCheckptHeight int32) error {
+
+	err := s.reader.SetHeight(uint32(curHeight))
+
+	if err != nil {
+		return err
+	}
+
+	if !s.skipVerify {
+		log.Debugf("sideloading from height to %v to last checkpoint", curHeight)
+	} else {
+		log.Debugf("sideloading from height to %v, chunk size=%v, "+
+			"to height=%v", curHeight, sideloadDataChunkSize, s.reader.
+			EndHeight())
+	}
+	for int32(s.reader.EndHeight()) >= nextCheckptHeight {
+
+		n := sideloadDataChunkSize
+
+		if !s.skipVerify {
+			n = nextCheckptHeight - curHeight
+		}
+
+		resp, err := s.reader.Load(uint32(n))
+
+		if err != nil {
+			return err
+		}
+
+		if (!s.skipVerify && resp == nil) || resp.CurHeight == curHeight {
+			log.Warnf("Halted sideloading at curHeight - %v", curHeight)
+			return nil
+		}
+		curHeight = resp.CurHeight
+		nextCheckptHeight = resp.NextCheckptHeight
+
+	}
+
+	return nil
 }
 
 // Ensure onionAddr implements the net.Addr interface.
